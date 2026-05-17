@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>GenLayer - BTC Prediction Terminal</title>
+<!-- Tailwind CSS v3 CDN -->
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<!-- Google Fonts: Inter -->
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+<style data-purpose="base-typography">
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: #000000;
+      color: #ffffff;
+      -webkit-font-smoothing: antialiased;
+    }
+  </style>
+<style data-purpose="custom-components">
+    /* Clipped Corner Button - Connect Wallet */
+    .btn-connect {
+      position: relative;
+      background: transparent;
+      border: 1px solid #ffffff;
+      padding: 8px 20px;
+      clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
+      transition: all 0.3s ease;
+    }
+    .btn-connect:hover {
+      background: rgba(255, 255, 255, 0.1);
+    }
+
+    /* Prediction Buttons Styling */
+    .btn-predict-up {
+      position: relative;
+      background-color: #ffffff;
+      color: #000000;
+      font-weight: 700;
+      clip-path: polygon(15px 0, 100% 0, 100% calc(100% - 15px), calc(100% - 15px) 100%, 0 100%, 0 15px);
+      transition: transform 0.2s;
+    }
+    .btn-predict-up:hover {
+      transform: scale(1.02);
+    }
+    .btn-predict-up:disabled,
+    .btn-predict-down:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .btn-predict-down {
+      position: relative;
+      background-color: transparent;
+      color: #ffffff;
+      border: 1px solid #ffffff;
+      font-weight: 700;
+      clip-path: polygon(15px 0, 100% 0, 100% calc(100% - 15px), calc(100% - 15px) 100%, 0 100%, 0 15px);
+      transition: transform 0.2s;
+    }
+    .btn-predict-down:hover {
+      background: rgba(255, 255, 255, 0.05);
+      transform: scale(1.02);
+    }
+
+    /* Scrollbar styling for a dark theme */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #000000;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #333;
+      border-radius: 10px;
+    }
+
+    /* Panel Borders */
+    .panel-border {
+      border: 1px solid #333;
+    }
+  </style>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/></head>
+<body class="min-h-screen p-4">
+<!-- BEGIN: MainHeader -->
+<header class="max-w-7xl mx-auto flex items-center justify-between mb-8 px-2" data-purpose="site-navigation">
+<div class="flex items-center gap-2">
+<!-- GenLayer Logo -->
+<div class="flex items-center gap-2" data-purpose="logo-container">
+<img class="w-8 h-8" src="https://assets.zksync.io/images/genlayer_white.svg" alt="GenLayer" />
+<span class="text-2xl font-bold tracking-tight">GenLayer</span>
+</div>
+</div>
+<nav class="hidden md:flex items-center gap-16 text-sm font-medium text-gray-400">
+<a class="hover:text-white transition-colors" href="#">Market</a>
+<a class="hover:text-white transition-colors" href="#">Governance</a>
+<a class="hover:text-white transition-colors" href="#">Stats</a>
+</nav>
+<div data-purpose="header-actions" class="flex items-center gap-3">
+  <span id="connection-label" class="text-xs text-gray-400 hidden">Disconnected</span>
+  <button id="btn-connect" class="btn-connect text-sm" onclick="connectWallet()">
+    Connect Wallet
+  </button>
+</div>
+</header>
+<!-- END: MainHeader -->
+<!-- BEGIN: MainContent -->
+<main class="max-w-7xl mx-auto">
+<div class="grid grid-cols-1 lg:grid-cols-12 gap-4">
+<!-- BEGIN: RoundSelector -->
+<div class="lg:col-span-12 flex items-center gap-2 overflow-x-auto pb-2" id="round-selector">
+  <span class="text-xs text-gray-500 mr-2 whitespace-nowrap">Rounds:</span>
+</div>
+<!-- END: RoundSelector -->
+<!-- BEGIN: ChartContainer -->
+<section class="lg:col-span-8 panel-border bg-[#0a0a0a] flex flex-col min-h-[300px] lg:min-h-[500px]" data-purpose="trading-view-live">
+<!-- Chart Toolbar -->
+<div class="flex items-center justify-between border-b border-[#2a2a2a] p-2 text-xs text-gray-400">
+<div class="flex items-center gap-4">
+<span class="flex items-center gap-1 font-bold text-gray-200">
+<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+              BTC/USDT · TradingView
+            </span>
+<span id="chart-phase-badge" class="px-2 py-0.5 rounded text-[10px] bg-gray-800 text-gray-300">IDLE</span>
+</div>
+<div class="flex items-center gap-3">
+<span id="current-btc-price" class="font-mono text-gray-200">—</span>
+</div>
+</div>
+<div class="flex flex-1 relative overflow-hidden">
+<!-- TradingView Widget -->
+<div class="flex-1 relative">
+  <iframe id="tradingview-chart" class="w-full h-full border-0" src="about:blank"></iframe>
+</div>
+</div>
+<!-- Chart Bottom Controls -->
+<div class="flex items-center justify-between border-t border-[#2a2a2a] p-2 text-[10px] text-gray-500">
+<div class="flex gap-3">
+<span class="text-gray-400">5 min rounds · Auto-managed</span>
+</div>
+<div class="flex gap-4">
+<span class="hover:text-white cursor-pointer uppercase">log</span>
+<span class="hover:text-white cursor-pointer uppercase">auto</span>
+</div>
+</div>
+</section>
+<!-- END: ChartContainer -->
+
+<!-- BEGIN: PredictionInterface -->
+<section class="lg:col-span-4 panel-border bg-[#0a0a0a] p-6 flex flex-col" data-purpose="user-actions">
+<h2 class="text-gray-400 text-sm mb-8 border-b border-[#2a2a2a] pb-2">Prediction Interface</h2>
+<div class="text-center mb-8">
+  <span id="phase-label" class="text-xs text-gray-500 uppercase tracking-widest block mb-2">Waiting for round...</span>
+  <div id="timer-text" class="text-3xl md:text-4xl font-bold font-mono tracking-tight leading-snug">—</div>
+  <div id="timer-sub" class="text-xs text-gray-500 mt-1 min-h-[16px]"></div>
+  <div class="h-1 bg-white/10 rounded-full mt-3 mx-auto w-full overflow-hidden"><div id="timer-fill" class="h-full transition-all duration-1000" style="width:0%;background:#fff"></div></div>
+</div>
+<div class="space-y-6">
+<div data-purpose="input-group">
+  <label class="block text-xs text-gray-500 mb-1">Wager Amount (GEN)</label>
+  <div class="flex items-center border border-[#333] bg-[#121212] rounded overflow-hidden">
+    <input id="bet-amount" class="bg-transparent border-none focus:ring-0 text-sm flex-1 px-4 py-3" type="number" min="0.01" step="0.01" value="1"/>
+    <button class="px-4 py-3 border-l border-[#333] hover:bg-[#1a1a1a] transition-colors" onclick="document.getElementById('bet-amount').stepUp()">+</button>
+    <button class="px-4 py-3 border-l border-[#333] hover:bg-[#1a1a1a] transition-colors" onclick="document.getElementById('bet-amount').stepDown()">-</button>
+  </div>
+</div>
+<div class="space-y-3 pt-4">
+  <button id="btn-up" class="btn-predict-up w-full py-4 text-sm uppercase tracking-widest" onclick="placeBet('UP')">
+    Predict Up ↑
+  </button>
+  <button id="btn-down" class="btn-predict-down w-full py-4 text-sm uppercase tracking-widest" onclick="placeBet('DOWN')">
+    Predict Down ↓
+  </button>
+  <p id="vote-feedback" class="text-xs text-center text-gray-400"></p>
+</div>
+<div class="pt-4 space-y-4">
+<div class="text-center text-sm">
+<span class="text-gray-400">Profit Multiplier:</span>
+<span class="text-white font-semibold">1.95x</span>
+</div>
+<div class="pt-4 border-t border-[#1a1a1a] space-y-3">
+  <div class="flex justify-between text-sm">
+    <span class="text-gray-500">Round</span>
+    <span class="text-white font-semibold"><span id="round-id">#0</span> · <span id="round-status-badge" class="text-gray-300">IDLE</span></span>
+  </div>
+  <div class="flex justify-between text-sm">
+    <span class="text-gray-500">Open/Close</span>
+    <span class="text-white font-semibold"><span id="open-price">$—</span> <span id="price-arrow" class="text-gray-500">→</span> <span id="close-price">$—</span></span>
+  </div>
+  <div class="flex justify-between text-sm">
+    <span class="text-gray-500">Votes (UP/DOWN)</span>
+    <span class="text-white font-semibold"><span id="up-count">0</span>/<span id="down-count">0</span></span>
+  </div>
+  <div class="flex justify-between text-sm">
+    <span class="text-gray-500">Pools</span>
+    <span class="text-white font-semibold"><span id="pool-up">0 GEN</span> · <span id="pool-down">0 GEN</span></span>
+  </div>
+  <div id="winner-banner" class="hidden text-center text-sm pt-2">
+    <span id="winner-icon">🏆</span>
+    <span id="winner-text" class="ml-1">—</span>
+  </div>
+  <!-- Participants -->
+  <div id="participants-panel" class="pt-3 border-t border-[#1a1a1a] hidden">
+    <span class="text-xs text-gray-500 block mb-2">Participants</span>
+    <div id="participants-list" class="text-xs text-gray-400 space-y-1 max-h-32 overflow-y-auto"></div>
+  </div>
+</div>
+</div>
+</div>
+</section>
+<!-- END: PredictionInterface -->
+</div>
+<!-- BEGIN: LiveFeedSection -->
+<section class="mt-4 bg-[#0a0a0a] overflow-hidden" data-purpose="user-history">
+<div class="p-4 border-b border-[#2a2a2a] flex items-center justify-between">
+<h3 class="text-sm font-medium text-gray-200">Your Bet History</h3>
+<span id="history-stats" class="text-xs text-gray-500"></span>
+</div>
+<div class="overflow-x-auto">
+<table class="w-full text-left text-xs text-gray-400">
+<thead>
+<tr class="border-b border-[#1a1a1a] text-gray-500 uppercase tracking-tighter">
+<th class="px-4 py-3 font-normal">Round</th>
+<th class="px-4 py-3 font-normal text-center">Your Bet</th>
+<th class="px-4 py-3 font-normal text-center">Amount</th>
+<th class="px-4 py-3 font-normal text-center">Entry</th>
+<th class="px-4 py-3 font-normal text-center">Lock → Close</th>
+<th class="px-4 py-3 font-normal text-center">Winner</th>
+<th class="px-4 py-3 font-normal text-center">Status</th>
+<th class="px-4 py-3 font-normal text-right">Action</th>
+</tr>
+</thead>
+<tbody id="history-body" class="divide-y divide-[#1a1a1a]">
+<tr><td colspan="8" class="px-4 py-8 text-center text-gray-600">Connect wallet to see your history</td></tr>
+</tbody>
+</table>
+</div>
+</section>
+<!-- END: LiveFeedSection -->
+</main>
+<!-- END: MainContent -->
+<script src="app.js?v=11"></script>
+</body></html>

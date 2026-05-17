@@ -1,0 +1,23 @@
+{
+  "name": "genlayer",
+  "version": "1.0.0",
+  "description": "A mini prediction game built on **GenLayer** — the AI-powered blockchain.",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "ethers": "^6.16.0",
+    "genlayer-js": "^1.1.8",
+    "tsx": "^4.22.0",
+    "typescript": "^6.0.3"
+  }
+}
