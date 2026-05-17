@@ -411,6 +411,15 @@ async function placeBet(direction) {
     // startHistoryRetry also renders the optimistic row immediately
     startHistoryRetry(roundIdNow, direction, amountGen, entryPrice);
 
+    // Save optimistic bet to survive F5
+    localStorage.setItem("optimistic_bet", JSON.stringify({
+      roundId: roundIdNow,
+      direction,
+      amountGen,
+      entryPrice,
+      timestamp: Date.now()
+    }));
+
     await pollRound();
   } catch (err) {
     if (feedback) { feedback.textContent = `❌ ${err.message}`; feedback.className = "vote-feedback error"; }
@@ -651,7 +660,26 @@ async function fetchUserHistory() {
     const history = typeof raw === "string" ? JSON.parse(raw) : (Array.isArray(raw) ? raw : []);
     
     const opt = document.getElementById("optimistic-row");
-    if ((!history || history.length === 0) && opt) {
+
+    // Restore optimistic bet from F5
+    try {
+      const savedOptStr = localStorage.getItem("optimistic_bet");
+      if (savedOptStr) {
+        const savedOpt = JSON.parse(savedOptStr);
+        if (Date.now() - savedOpt.timestamp < 300000) { // 5 mins
+          const inHistory = history.some(h => String(h.round_id) === String(savedOpt.roundId));
+          if (!inHistory && !opt) {
+            startHistoryRetry(savedOpt.roundId, savedOpt.direction, savedOpt.amountGen, savedOpt.entryPrice);
+          } else if (inHistory) {
+            localStorage.removeItem("optimistic_bet");
+          }
+        } else {
+          localStorage.removeItem("optimistic_bet");
+        }
+      }
+    } catch (e) {}
+
+    if ((!history || history.length === 0) && (opt || localStorage.getItem("optimistic_bet"))) {
       return; // Do not overwrite optimistic row if on-chain history is still empty
     }
     
@@ -669,6 +697,7 @@ async function fetchUserHistory() {
     }
   } catch (e) {
     console.warn("History fetch error:", e.message);
+    throw e; // throw error so that fetchUserHistoryWithRetry actually retries
   }
 }
 
