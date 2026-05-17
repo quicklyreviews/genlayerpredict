@@ -482,6 +482,7 @@ async function pollRound() {
 
   // Poll user's bet info if connected
   if (userAccount) {
+    // Bug #1 fix: separate try-catch so fetchUserHistory always runs
     try {
       const myBet = await readContract("get_my_bet", [userAccount]);
       updateMyBetUI(myBet);
@@ -490,8 +491,16 @@ async function pollRound() {
         const mp = $("my-bet-payout");
         if (mp) mp.textContent = payout !== "0" ? (BigInt(payout) / BigInt(1e18)).toString() + " GEN" : "—";
       }
+    } catch (e) {
+      console.warn("get_my_bet error:", e.message);
+    }
+
+    // fetchUserHistory ALWAYS runs, independent try-catch
+    try {
       await fetchUserHistory();
-    } catch (e) {}
+    } catch (e) {
+      console.warn("fetchUserHistory error:", e.message);
+    }
   }
 }
 
@@ -605,6 +614,20 @@ async function fetchUserHistory() {
   }
 }
 
+// Bug #4 fix: retry wrapper for Render cold start
+async function fetchUserHistoryWithRetry(maxRetries = 3, delayMs = 3000) {
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      await fetchUserHistory();
+      return; // success
+    } catch (e) {
+      console.warn(`History fetch attempt ${i + 1}/${maxRetries} failed:`, e.message);
+      if (i < maxRetries - 1) await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+  console.warn("All history fetch retries exhausted");
+}
+
 function renderUserHistory(history) {
   const tbody = document.getElementById("history-body");
   const stats = document.getElementById("history-stats");
@@ -700,17 +723,20 @@ async function connectWallet() {
     if (btn) btn.textContent = "Connected";
     addLog(`Connected: ${userAccount.slice(0, 10)}...`);
 
-    // Immediately load history for this wallet
-    fetchUserHistory();
+    // Immediately load history for this wallet (with retry for Render cold start)
+    fetchUserHistoryWithRetry();
 
+    // Bug #3 fix: accountsChanged reloads history + caches new wallet
     provider.on("accountsChanged", (accs) => {
       if (accs.length === 0) {
         disconnectWallet();
         clearWalletCache();
       } else {
         userAccount = accs[0];
+        cacheWallet(userAccount);
         const lbl = $("connection-label"); if (lbl) lbl.textContent = userAccount.slice(0, 8) + "...";
         addLog(`Account changed: ${userAccount.slice(0, 10)}...`);
+        fetchUserHistoryWithRetry();
       }
     });
 
@@ -798,22 +824,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   setInterval(fetchBTCPrice, 30000);
   startPolling();
 
-  // Auto-reconnect from cached wallet
+  // Bug #2 fix: auto-reconnect uses connectWallet() for full event registration
   const cached = getCachedWallet();
   const initProvider = getProvider();
   if (cached && initProvider) {
-    // Try to get accounts without prompting user
-    initProvider.request({ method: "eth_accounts" }).then(accounts => {
+    initProvider.request({ method: "eth_accounts" }).then(async (accounts) => {
       if (accounts && accounts.length > 0) {
-        // Wallet already unlocked in browser - auto restore session
         const matched = accounts.find(a => a.toLowerCase() === cached);
         if (matched) {
-          userAccount = matched;
-          const btn = $("btn-connect"); if (btn) btn.textContent = "Connected";
-          const label = $("connection-label"); if (label) { label.textContent = userAccount.slice(0, 8) + "..."; label.classList.remove("hidden"); }
-          addLog(`↻ Session restored: ${userAccount.slice(0, 10)}...`);
-          fetchUserHistory();
-          ensureStudioChain().catch(() => {});
+          addLog(`↻ Auto-reconnecting cached wallet...`);
+          await connectWallet(); // full reconnect: events + dot + history + polling
         }
       }
     }).catch(() => {});
