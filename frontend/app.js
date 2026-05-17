@@ -53,14 +53,30 @@ function renderHistoryStatus(status) {
 
 // ─── Backend API (reads only) ────────────────────────────────────────
 
+let _backendErrorCount = 0;
+let _backendPaused = false;
+
 async function apiCall(endpoint, options = {}) {
-  const res = await fetch(`${CONFIG.backendUrl}${endpoint}`, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
-  const data = await res.json();
-  if (data.error) throw new Error(data.error);
-  return data;
+  if (_backendPaused) throw new Error("Backend paused due to errors");
+  try {
+    const res = await fetch(`${CONFIG.backendUrl}${endpoint}`, {
+      headers: { "Content-Type": "application/json" },
+      ...options,
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    _backendErrorCount = 0; // reset on success
+    _backendPaused = false;
+    return data;
+  } catch (e) {
+    _backendErrorCount++;
+    if (_backendErrorCount >= 3) {
+      _backendPaused = true;
+      setTimeout(() => { _backendPaused = false; _backendErrorCount = 0; }, 60000); // thử lại sau 1 phút
+      addLog("⚠️ Backend unreachable — pausing polls for 60s");
+    }
+    throw e;
+  }
 }
 
 async function readContract(functionName, args = []) {
@@ -724,7 +740,7 @@ function startPolling() {
   pollRound();
   pollInterval = setInterval(() => {
     pollRound();
-  }, 5000);
+  }, 15000);
 }
 
 // Helper: detect wallet provider (MetaMask, OKX, etc.)
