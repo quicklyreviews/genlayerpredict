@@ -7,7 +7,7 @@
 
 // ─── Configuration ──────────────────────────────────────────────────
 let CONFIG = {
-  backendUrl: "http://localhost:3005",
+  backendUrl: "https://genlayerpredict.onrender.com",
   contractAddress: "0x0956ED7a2Ea9B868e5864f53A6379faA9f53bcF3",
 };
 
