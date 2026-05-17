@@ -22,6 +22,29 @@ const client = createClient({
   account,
 });
 
+// ─── Fetch BTC price from Binance ──────────────────────────────────
+async function fetchBTCPrice() {
+  try {
+    const r = await fetch("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT");
+    const d = await r.json();
+    const price = parseFloat(d.price).toFixed(2);
+    console.log(`[PRICE] BTC = $${price}`);
+    return price;
+  } catch (e) {
+    console.warn(`[PRICE] Binance failed, trying CoinGecko...`);
+    try {
+      const r2 = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd");
+      const d2 = await r2.json();
+      const price = String(d2.bitcoin.usd);
+      console.log(`[PRICE] BTC = $${price} (CoinGecko)`);
+      return price;
+    } catch (e2) {
+      console.error(`[PRICE] All price feeds failed`);
+      return null;
+    }
+  }
+}
+
 function cors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -254,7 +277,9 @@ async function startCron() {
         if (now >= bettingEnd + 10) {
           if (lastActionType === "lock" && (now - lastActionTime) < 120) return;
           console.log(`[CRON] 🔒 Locking round ${roundId}...`);
-          const tx = await handleWrite("lock_round", []);
+          const price = await fetchBTCPrice();
+          if (!price) { console.error(`[CRON] Cannot lock: price unavailable`); return; }
+          const tx = await handleWrite("lock_round", [price]);
           console.log(`[CRON]   TX: ${tx.txHash}`);
           logTx("lock_round", tx.txHash, roundId);
           lastActionTime = now; lastActionType = "lock"; lastActionRound = roundId;
@@ -278,7 +303,9 @@ async function startCron() {
           if (resolveBackoffUntil > 0 && now < resolveBackoffUntil) return;
           if (lastActionType === "resolve" && (now - lastActionTime) < 120) return;
           console.log(`[CRON] ✅ Resolving round ${roundId}...`);
-          const tx = await handleWrite("resolve_round", []);
+          const price = await fetchBTCPrice();
+          if (!price) { console.error(`[CRON] Cannot resolve: price unavailable`); return; }
+          const tx = await handleWrite("resolve_round", [price]);
           console.log(`[CRON]   TX: ${tx.txHash}`);
           logTx("resolve_round", tx.txHash, roundId);
           lastActionTime = now; lastActionType = "resolve"; lastActionRound = roundId;

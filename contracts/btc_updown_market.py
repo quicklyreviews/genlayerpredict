@@ -155,28 +155,32 @@ class BtcUpDownMarket(gl.Contract):
     # ─── Phase 3: Lock Round ────────────────────────────────────────────
 
     @gl.public.write
-    def lock_round(self) -> None:
+    def lock_round(self, price: str) -> None:
         if self.status != "OPEN":
             raise gl.vm.UserError("Round must be OPEN to lock")
 
-        now = u256(int(time.time()))
-        # if now < self.round_start_time + self.betting_seconds:
-        #     raise gl.vm.UserError("Betting window has not ended yet")
-
-        # Temporary hardcode to verify round flow
-        self.start_price = "78000"
+        self.start_price = price
         self.status = "LOCKED"
 
     # ─── Phase 4: Resolve Round ─────────────────────────────────────────
 
     @gl.public.write
-    def resolve_round(self) -> None:
+    def resolve_round(self, price: str) -> None:
         if self.status != "LOCKED":
             raise gl.vm.UserError("Round must be LOCKED to resolve")
 
-        # Temporary hardcode to verify round flow
-        self.end_price = "78100"
-        self.winner = "UP"
+        self.end_price = price
+
+        # Determine winner
+        sp = float(self.start_price)
+        ep = float(price)
+        if ep > sp:
+            self.winner = "UP"
+        elif ep < sp:
+            self.winner = "DOWN"
+        else:
+            self.winner = "DRAW"
+
         self.status = "RESOLVED"
 
         # Save result using only safe types (no u256 in json)

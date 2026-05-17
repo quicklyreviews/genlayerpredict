@@ -769,12 +769,12 @@ function loadTradingView() {
 
 async function fetchBTCPrice() {
   try {
-    const r = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd", { cache: "no-cache" });
+    const r = await fetch("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT");
     const d = await r.json();
-    const price = d?.bitcoin?.usd;
+    const price = parseFloat(d.price);
     if (price) {
       const el = $("current-btc-price");
-      if (el) el.textContent = `$${price.toLocaleString()}`;
+      if (el) el.textContent = `$${price.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
     }
   } catch (e) {}
 }
