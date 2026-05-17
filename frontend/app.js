@@ -8,7 +8,7 @@
 // ─── Configuration ──────────────────────────────────────────────────
 let CONFIG = {
   backendUrl: "https://genlayerpredict.onrender.com",
-  contractAddress: "0x0956ED7a2Ea9B868e5864f53A6379faA9f53bcF3",
+  contractAddress: "0x19320BEfd3019427A7f316E3e7779D7158310b07",
 };
 
 const STUDIO_CHAIN_ID = "0xF22F"; // 61999

@@ -174,27 +174,28 @@ class BtcUpDownMarket(gl.Contract):
         if self.status != "LOCKED":
             raise gl.vm.UserError("Round must be LOCKED to resolve")
 
-        now = u256(int(time.time()))
-        # if now < self.round_start_time + self.betting_seconds + self.lock_seconds:
-        #     raise gl.vm.UserError("Lock period has not ended yet")
-
         # Temporary hardcode to verify round flow
         self.end_price = "78100"
         self.winner = "UP"
         self.status = "RESOLVED"
 
+        # Save result using only safe types (no u256 in json)
         rid = int(self.round_id)
-        result_key = f"round_result_{rid}"
-        gl.ContractState[result_key] = json.dumps({
-            "round_id":    int(self.round_id),
-            "start_price": self.start_price,
-            "end_price":   self.end_price,
-            "winner":      self.winner,
-            "up_pool":     str(self.up_pool),
-            "down_pool":   str(self.down_pool),
-            "up_count":    int(self.up_count),
-            "down_count":  int(self.down_count),
+        up_p = int(self.up_pool)
+        down_p = int(self.down_pool)
+        up_c = int(self.up_count)
+        down_c = int(self.down_count)
+        result_str = json.dumps({
+            "round_id":    rid,
+            "start_price": str(self.start_price),
+            "end_price":   str(self.end_price),
+            "winner":      str(self.winner),
+            "up_pool":     str(up_p),
+            "down_pool":   str(down_p),
+            "up_count":    up_c,
+            "down_count":  down_c,
         })
+        gl.ContractState[f"round_result_{rid}"] = result_str
 
     # ─── Phase 5: Claim ─────────────────────────────────────────────────
 
