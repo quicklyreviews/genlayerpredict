@@ -59,13 +59,37 @@ function json(res, data, status = 200) {
   res.end(JSON.stringify(data));
 }
 
+// Cached results per method for fallback
+const readCache = {};
+
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`RPC timeout after ${ms}ms`)), ms))
+  ]);
+}
+
 async function handleRead(method, args) {
-  const result = await client.readContract({
-    address: CONTRACT_ADDRESS,
-    functionName: method,
-    args: args || [],
-  });
-  return result;
+  const cacheKey = method + JSON.stringify(args || []);
+  try {
+    const result = await withTimeout(
+      client.readContract({
+        address: CONTRACT_ADDRESS,
+        functionName: method,
+        args: args || [],
+      }),
+      25000  // 25s timeout — Render default is 30s
+    );
+    readCache[cacheKey] = result; // update cache on success
+    return result;
+  } catch (e) {
+    // If we have a cached result, return it with a flag
+    if (readCache[cacheKey] !== undefined) {
+      console.warn(`[RPC] ${method} failed (${e.message}), serving from cache`);
+      return readCache[cacheKey];
+    }
+    throw e;
+  }
 }
 
 async function handleWrite(method, args) {
