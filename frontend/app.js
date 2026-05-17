@@ -70,12 +70,12 @@ async function readContract(functionName, args = []) {
 // ─── Wallet Write ────────────────────────────────────────────────────
 
 async function writeContract(functionName, args = [], valueWei = "0x0") {
-  if (!window.ethereum) throw new Error("No wallet detected");
+  if (!getProvider()) throw new Error("No wallet detected");
   if (!userAccount) throw new Error("Wallet not connected");
 
   await ensureStudioChain();
 
-  const txHash = await window.ethereum.request({
+  const txHash = await getProvider().request({
     method: "eth_sendTransaction",
     params: [{
       from: userAccount,
@@ -94,17 +94,17 @@ async function writeContract(functionName, args = [], valueWei = "0x0") {
 // ─── Chain Management ────────────────────────────────────────────────
 
 async function ensureStudioChain() {
-  const currentChainId = await window.ethereum.request({ method: "eth_chainId" });
+  const currentChainId = await getProvider().request({ method: "eth_chainId" });
   if (currentChainId === STUDIO_CHAIN_ID) return;
 
   try {
-    await window.ethereum.request({
+    await getProvider().request({
       method: "wallet_switchEthereumChain",
       params: [{ chainId: STUDIO_CHAIN_ID }],
     });
   } catch (switchError) {
     if (switchError.code === 4902) {
-      await window.ethereum.request({
+      await getProvider().request({
         method: "wallet_addEthereumChain",
         params: [{
           chainId: STUDIO_CHAIN_ID,
@@ -663,7 +663,12 @@ function startPolling() {
   }, 5000);
 }
 
-// ─── Connection ─────────────────────────────────────────────────────
+// Helper: detect wallet provider (MetaMask, OKX, etc.)
+function getProvider() {
+  if (window.ethereum) return window.ethereum;
+  if (window.okxwallet) return window.okxwallet;
+  return null;
+}
 
 async function connectWallet() {
   if (!CONFIG.contractAddress) {
@@ -675,15 +680,16 @@ async function connectWallet() {
   const label = $("connection-label");
   const btn = $("btn-connect");
 
-  if (!window.ethereum) {
+  const provider = getProvider();
+  if (!provider) {
     if (dot) dot.className = "status-dot status-dot--disconnected";
     if (label) label.textContent = "No wallet found";
-    addLog("❌ No wallet detected. Install MetaMask or GenLayer Wallet.");
+    addLog("❌ No wallet detected. Install MetaMask or OKX Wallet.");
     return;
   }
 
   try {
-    const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+    const accounts = await provider.request({ method: "eth_requestAccounts" });
     userAccount = accounts[0];
     cacheWallet(userAccount);
 
@@ -697,7 +703,7 @@ async function connectWallet() {
     // Immediately load history for this wallet
     fetchUserHistory();
 
-    window.ethereum.on("accountsChanged", (accs) => {
+    provider.on("accountsChanged", (accs) => {
       if (accs.length === 0) {
         disconnectWallet();
         clearWalletCache();
@@ -708,7 +714,7 @@ async function connectWallet() {
       }
     });
 
-    window.ethereum.on("chainChanged", () => {
+    provider.on("chainChanged", () => {
       addLog("Network changed — reconnecting...");
       connectWallet();
     });
@@ -794,9 +800,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // Auto-reconnect from cached wallet
   const cached = getCachedWallet();
-  if (cached && window.ethereum) {
+  const initProvider = getProvider();
+  if (cached && initProvider) {
     // Try to get accounts without prompting user
-    window.ethereum.request({ method: "eth_accounts" }).then(accounts => {
+    initProvider.request({ method: "eth_accounts" }).then(accounts => {
       if (accounts && accounts.length > 0) {
         // Wallet already unlocked in browser - auto restore session
         const matched = accounts.find(a => a.toLowerCase() === cached);
