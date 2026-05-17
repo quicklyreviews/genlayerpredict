@@ -29,37 +29,13 @@ async function main() {
   console.log("TX Hash:", hash);
 
   // Poll for finalization
-  console.log("Polling for finalization (up to 5 min)...");
-  let receipt: any = null;
-  for (let i = 0; i < 60; i++) {
-    await new Promise((r) => setTimeout(r, 5000));
-    try {
-      const r = await fetch(rpcUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          method: "eth_getTransactionReceipt",
-          params: [hash],
-          id: 1,
-        }),
-      });
-      const d: any = await r.json();
-      const status = d?.result?.status;
-      console.log(`   [${i + 1}/60] status: ${status ?? "pending"}`);
-      if (status === "0x1") {
-        receipt = d.result;
-        break;
-      }
-    } catch (e) {
-      console.log(`   [${i + 1}/60] poll error, retrying...`);
-    }
-  }
-
-  if (!receipt) {
-    throw new Error("Transaction did not finalize within 5 minutes");
-  }
-
+  console.log("Waiting for finalization...");
+  const receipt = await client.waitForTransactionReceipt({
+    hash: hash as `0x${string}`,
+    status: "FINALIZED",
+    interval: 5000,
+    retries: 60,
+  });
   console.log("\n✅ start_round finalized!");
 
   // Read state after

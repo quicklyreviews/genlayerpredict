@@ -4,6 +4,9 @@
  * Users connect their own wallet (MetaMask / GenLayer Wallet).
  * Reads go through backend proxy. Writes are signed by user's wallet.
  */
+import { createClient } from 'genlayer-js';
+import { studionet } from 'genlayer-js/chains';
+import { TransactionStatus } from 'genlayer-js/types';
 
 // ─── Configuration ──────────────────────────────────────────────────
 let CONFIG = {
@@ -67,24 +70,42 @@ async function readContract(functionName, args = []) {
   });
 }
 
+// ─── GenLayer Client ─────────────────────────────────────────────────
+
+let _glClient = null;
+
+function getGenLayerClient() {
+  if (!_glClient) {
+    _glClient = createClient({
+      chain: studionet,
+      account: userAccount,
+    });
+  }
+  if (_glClient._account !== userAccount) {
+    _glClient = createClient({
+      chain: studionet,
+      account: userAccount,
+    });
+  }
+  return _glClient;
+}
+
 // ─── Wallet Write ────────────────────────────────────────────────────
 
 async function writeContract(functionName, args = [], valueWei = "0x0") {
   if (!getProvider()) throw new Error("No wallet detected");
   if (!userAccount) throw new Error("Wallet not connected");
 
-  await ensureStudioChain();
+  const client = getGenLayerClient();
+  await client.connect("studionet");
 
-  const txHash = await getProvider().request({
-    method: "eth_sendTransaction",
-    params: [{
-      from: userAccount,
-      to: CONFIG.contractAddress,
-      function_name: functionName,
-      function_args: args,
-      value: valueWei,
-      gas: "0x7A1200",
-    }],
+  const valueBigInt = typeof valueWei === "string" ? BigInt(valueWei) : BigInt(valueWei);
+
+  const txHash = await client.writeContract({
+    address: CONFIG.contractAddress,
+    functionName: functionName,
+    args: args,
+    value: valueBigInt,
   });
 
   addLog(`TX sent: ${functionName}() → ${txHash.slice(0, 14)}...`);
@@ -330,6 +351,26 @@ async function placeBet(direction) {
 
     const fn = direction === "UP" ? "bet_up" : "bet_down";
     const txHash = await writeContract(fn, [], amountWeiHex);
+
+    // Cập nhật UI: đang chờ confirm
+    if (feedback) {
+      feedback.textContent = "Waiting for confirmation...";
+      feedback.className = "vote-feedback";
+    }
+
+    try {
+      const client = getGenLayerClient();
+      await client.waitForTransactionReceipt({
+        hash: txHash,
+        status: TransactionStatus.ACCEPTED,
+        interval: 3000,
+        retries: 40,
+      });
+      addLog(`✅ TX accepted: ${fn}`);
+    } catch (waitErr) {
+      console.warn("TX wait timeout:", waitErr.message);
+      addLog(`⚠️ TX confirmation timeout — sẽ retry qua polling`);
+    }
 
     // Set localBet immediately to block re-betting
     localBet = { roundId: roundIdNow, direction, amount: amountGen };
@@ -839,3 +880,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     }).catch(() => {});
   }
 });
+
+// ─── Export to Window for HTML event listeners ───────────────────────
+window.connectWallet = connectWallet;
+window.disconnectWallet = disconnectWallet;
+window.placeBet = placeBet;
+window.claimBet = claimBet;
+window.selectRound = selectRound;
+window.openConfig = openConfig;
+window.closeConfig = closeConfig;
+window.saveConfig = saveConfig;
