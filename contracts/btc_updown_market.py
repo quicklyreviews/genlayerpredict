@@ -423,7 +423,7 @@ class BtcUpDownMarket(gl.Contract):
         try: return gl.ContractState[f"participants_{int(round_id)}"]
         except: return "[]"
 
-    # ─── Debug: bypass oracle for testing ────────────────────────────────
+    # ─── Debug: bypass oracle for testing ────────────────────────────────────
 
     @gl.public.write
     def force_lock_debug(self, price: str) -> None:
@@ -444,9 +444,22 @@ class BtcUpDownMarket(gl.Contract):
         elif e < s: self.winner = "DOWN"
         else:       self.winner = "DRAW"
         self.status = "RESOLVED"
-        gl.ContractState[f"round_result_{self.round_id}"] = json.dumps({
-            "round_id": int(self.round_id), "start_price": self.start_price,
+        rid = int(self.round_id)  # must cast u256 to int
+        gl.ContractState[f"round_result_{rid}"] = json.dumps({
+            "round_id": rid, "start_price": self.start_price,
             "end_price": self.end_price, "winner": self.winner,
-            "up_pool": str(self.up_pool), "down_pool": str(self.down_pool),
+            "up_pool": str(int(self.up_pool)), "down_pool": str(int(self.down_pool)),
             "up_count": int(self.up_count), "down_count": int(self.down_count),
         })
+
+    @gl.public.write
+    def admin_reset_to_idle(self) -> None:
+        """Emergency: reset any stuck state back to IDLE so start_round can run."""
+        self.status = "IDLE"
+        self.start_price = "0"
+        self.end_price = "0"
+        self.winner = "NONE"
+        self.up_pool = u256(0)
+        self.down_pool = u256(0)
+        self.up_count = u256(0)
+        self.down_count = u256(0)
