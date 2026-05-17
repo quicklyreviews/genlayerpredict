@@ -1,6 +1,6 @@
-require("dotenv").config();
-
 const http = require("http");
+const fs = require("fs");
+const path = require("path");
 const { createClient } = require("genlayer-js");
 const { privateKeyToAccount } = require("viem/accounts");
 const { localnet } = require("genlayer-js/chains");
@@ -8,10 +8,29 @@ const { TransactionStatus } = require("genlayer-js/types");
 
 const PORT = 3005;
 const RPC_URL = "https://studio.genlayer.com/api";
-const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
-if (!CONTRACT_ADDRESS) throw new Error("❌ Missing CONTRACT_ADDRESS in .env");
+// IMPORTANT: Hardcoded to latest deploy. Update here after each redeploy.
+const CONTRACT_ADDRESS = "0x48B657D6b52918A539617566D87Ae0c4e227c66D";
 
 let cachedRound = null;
+const roundHistory = {}; // rid -> result JSON, cached by backend when round resolves
+
+// Manually parse .env to avoid dotenv v17 corruption
+function loadEnv() {
+  try {
+    const envPath = path.join(__dirname, "..", ".env");
+    const content = fs.readFileSync(envPath, "utf-8");
+    for (const line of content.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eqIdx = trimmed.indexOf("=");
+      if (eqIdx === -1) continue;
+      const key = trimmed.slice(0, eqIdx).trim();
+      const val = trimmed.slice(eqIdx + 1).trim();
+      process.env[key] = val; // always override, dotenv v17 may have corrupted
+    }
+  } catch (e) { console.warn("Could not load .env:", e.message); }
+}
+loadEnv();
 
 const rawPk = process.env.PRIVATE_KEY || "";
 const privateKey = rawPk.startsWith("0x") ? rawPk : `0x${rawPk}`;
@@ -167,6 +186,24 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === "GET" && url.pathname.startsWith("/api/past-round/")) {
+    const rid = parseInt(url.pathname.split("/").pop());
+    // Serve from backend cache first (ContractState writes break resolve_round)
+    if (roundHistory[rid]) {
+      try {
+        json(res, JSON.parse(roundHistory[rid]));
+        return;
+      } catch (e) { /* fall through */ }
+    }
+    try {
+      const data = await handleRead("get_past_round", [rid]);
+      json(res, data);
+    } catch (e) {
+      json(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
   if (req.method === "GET" && url.pathname === "/api/account") {
     json(res, { address: account.address });
     return;
@@ -211,7 +248,7 @@ const server = http.createServer(async (req, res) => {
 
 // ─── Verify state after TX ─────────────────────────────────────────
 async function waitAndVerifyState(action, expectedRoundId) {
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < 24; i++) {
     await new Promise(r => setTimeout(r, 5000));
     try {
       const r = await handleRead("get_round", []);
@@ -281,8 +318,14 @@ async function startCron() {
       const bettingSec = Number(round.betting_seconds  || 300);
       const lockSec    = Number(round.lock_seconds     || 300);
 
+      // If we already acted on this round, wait before retry
       if (lastActionRound === roundId && lastActionType !== "start") {
-        if ((now - lastActionTime) < 120) return;
+        if ((now - lastActionTime) < 10) return;
+      }
+      // Safety: clear stale pendingAction after 3 min
+      if (pendingAction && (now - lastActionTime) > 180) {
+        console.log(`[CRON] Clearing stale pendingAction: ${pendingAction}`);
+        pendingAction = null;
       }
 
       // ── START ──────────────────────────────────────────
@@ -343,9 +386,15 @@ async function startCron() {
           lastActionTime = now; lastActionType = "resolve"; lastActionRound = roundId;
           resolveFailures = 0; resolveBackoffUntil = 0;
           pendingAction = "resolve_round";
-          waitAndVerifyState("resolve_round", roundId).then(ok => {
+          waitAndVerifyState("resolve_round", roundId).then(async (ok) => {
             pendingAction = null;
-            if (!ok) {
+            if (ok) {
+              // Cache the result for past-round lookup
+              try {
+                const r = await handleRead("get_round", []);
+                if (r.last_result) roundHistory[roundId] = r.last_result;
+              } catch (e) { console.warn(`[CACHE] Failed to cache round ${roundId}:`, e.message); }
+            } else {
               resolveFailures++;
               const delay = Math.min(300, 30 * Math.pow(2, resolveFailures));
               resolveBackoffUntil = Math.floor(Date.now() / 1000) + delay;

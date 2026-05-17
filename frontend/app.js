@@ -10,8 +10,8 @@ import { TransactionStatus } from 'genlayer-js/types';
 
 // ─── Configuration ──────────────────────────────────────────────────
 let CONFIG = {
-  backendUrl: "https://genlayerpredict.onrender.com",
-  contractAddress: "0x59273820Cb0B52FcaBbAEF518fBd8e8af30da93b",
+  backendUrl: "http://localhost:3005",
+  contractAddress: "0x48B657D6b52918A539617566D87Ae0c4e227c66D",
 };
 
 const STUDIO_CHAIN_ID = "0xF22F"; // 61999
@@ -112,8 +112,9 @@ async function writeContract(functionName, args = [], valueWei = "0x0") {
   if (!getProvider()) throw new Error("No wallet detected");
   if (!userAccount) throw new Error("Wallet not connected");
 
+  await ensureStudioChain(); // Switch network manually instead of using client.connect() which requires Snaps
+
   const client = getGenLayerClient();
-  await client.connect("studionet");
 
   const valueBigInt = typeof valueWei === "string" ? BigInt(valueWei) : BigInt(valueWei);
 
@@ -901,7 +902,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 window.connectWallet = connectWallet;
 window.disconnectWallet = disconnectWallet;
 window.placeBet = placeBet;
-window.claimBet = claimBet;
+window.claimBet = claimWinnings;
 window.selectRound = selectRound;
 window.openConfig = openConfig;
 window.closeConfig = closeConfig;

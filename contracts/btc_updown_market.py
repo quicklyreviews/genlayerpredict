@@ -1,4 +1,4 @@
-# v0.3.0-test — hardcoded prices to verify OPEN→LOCKED→RESOLVED→OPEN flow
+# v0.4.0 — pure write contract, no nondet. Prices passed by backend cron.
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
 from genlayer import *
@@ -21,6 +21,7 @@ class BtcUpDownMarket(gl.Contract):
     up_count: u256
     down_count: u256
     total_rounds: u256
+    last_result: str
 
     def __init__(self):
         self.round_id = u256(0)
@@ -29,37 +30,14 @@ class BtcUpDownMarket(gl.Contract):
         self.end_price = "0"
         self.winner = "NONE"
         self.round_start_time = u256(0)
-        self.betting_seconds = u256(300)
-        self.lock_seconds = u256(300)
+        self.betting_seconds = u256(60)
+        self.lock_seconds = u256(60)
         self.up_pool = u256(0)
         self.down_pool = u256(0)
         self.up_count = u256(0)
         self.down_count = u256(0)
         self.total_rounds = u256(0)
-
-    # ─── Internal: BTC Price Oracle ──────────────────────────────────────
-    # NOTE: Using GenLayer nondet web fetch with Binance API.
-    # A hardcoded fallback is used if the fetch fails to ensure state progresses.
-
-    def _fetch_btc_price(self) -> str:
-        def fetch_price() -> str:
-            web_data = gl.nondet.web.render(
-                "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
-                mode="text"
-            )
-            data = json.loads(web_data)
-            price = data["price"]
-            return str(int(float(str(price))))
-
-        def price_validator(leader: str, validator: str) -> bool:
-            try:
-                l = int(float(leader.strip()))
-                v = int(float(validator.strip()))
-                return abs(l - v) <= max(1, l // 200)
-            except (ValueError, TypeError):
-                return False
-
-        return gl.eq_principle.get(fetch_price, price_validator)
+        self.last_result = ""
 
     # ─── Phase 1: Start Round ───────────────────────────────────────────
 
@@ -168,38 +146,22 @@ class BtcUpDownMarket(gl.Contract):
     def resolve_round(self, price: str) -> None:
         if self.status != "LOCKED":
             raise gl.vm.UserError("Round must be LOCKED to resolve")
-
         self.end_price = price
-
-        # Determine winner
-        sp = float(self.start_price)
-        ep = float(price)
-        if ep > sp:
-            self.winner = "UP"
-        elif ep < sp:
-            self.winner = "DOWN"
-        else:
-            self.winner = "DRAW"
-
+        self.winner = "UP" if float(price) > float(self.start_price) else ("DOWN" if float(price) < float(self.start_price) else "DRAW")
         self.status = "RESOLVED"
 
-        # Save result using only safe types (no u256 in json)
+        # Save result in field (no ContractState — breaks on GenLayer)
         rid = int(self.round_id)
-        up_p = int(self.up_pool)
-        down_p = int(self.down_pool)
-        up_c = int(self.up_count)
-        down_c = int(self.down_count)
-        result_str = json.dumps({
+        self.last_result = json.dumps({
             "round_id":    rid,
             "start_price": str(self.start_price),
             "end_price":   str(self.end_price),
             "winner":      str(self.winner),
-            "up_pool":     str(up_p),
-            "down_pool":   str(down_p),
-            "up_count":    up_c,
-            "down_count":  down_c,
+            "up_pool":     str(int(self.up_pool)),
+            "down_pool":   str(int(self.down_pool)),
+            "up_count":    int(self.up_count),
+            "down_count":  int(self.down_count),
         })
-        gl.ContractState[f"round_result_{rid}"] = result_str
 
     # ─── Phase 5: Claim ─────────────────────────────────────────────────
 
@@ -223,13 +185,17 @@ class BtcUpDownMarket(gl.Contract):
         if player_vote == "":
             raise gl.vm.UserError("No bet found for this round")
 
-        result_key = f"round_result_{rid}"
-        try:
-            result_json = gl.ContractState[result_key]
-        except:
-            raise gl.vm.UserError("Round not resolved yet")
-        if result_json == "":
-            raise gl.vm.UserError("Round not resolved yet")
+        # Read result from last_result field (current round) or ContractState (past rounds)
+        if rid == int(self.round_id) and self.last_result != "":
+            result_json = self.last_result
+        else:
+            result_key = f"round_result_{rid}"
+            try:
+                result_json = gl.ContractState[result_key]
+            except:
+                raise gl.vm.UserError("Round not resolved yet")
+            if result_json == "":
+                raise gl.vm.UserError("Round not resolved yet")
 
         result     = json.loads(result_json)
         winner     = result.get("winner", "NONE")
@@ -283,7 +249,19 @@ class BtcUpDownMarket(gl.Contract):
             "up_count":         int(self.up_count),
             "down_count":       int(self.down_count),
             "total_rounds":     int(self.total_rounds),
+            "last_result":      self.last_result,
         }
+
+    @gl.public.view
+    def get_past_round(self, round_id: u256) -> dict[str, typing.Any]:
+        rid = int(round_id)
+        try:
+            result_json = gl.ContractState[f"round_result_{rid}"]
+            if result_json == "":
+                return {"error": "not found"}
+            return json.loads(result_json)
+        except:
+            return {"error": "not found"}
 
     @gl.public.view
     def get_my_bet(self, addr: str) -> dict[str, typing.Any]:

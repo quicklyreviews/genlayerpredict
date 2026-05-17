@@ -1,8 +1,23 @@
-require("dotenv").config();
-
 import { createClient } from "genlayer-js";
 import * as fs from "fs";
 import * as path from "path";
+
+// Manually parse .env to avoid dotenv v17 corruption with non-ASCII chars
+function loadEnv() {
+  const envPath = path.join(__dirname, "..", ".env");
+  if (!fs.existsSync(envPath)) return;
+  const content = fs.readFileSync(envPath, "utf-8");
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eqIdx = trimmed.indexOf("=");
+    if (eqIdx === -1) continue;
+    const key = trimmed.slice(0, eqIdx).trim();
+    const val = trimmed.slice(eqIdx + 1).trim();
+    process.env[key] = val;
+  }
+}
+loadEnv();
 
 async function main() {
   const { privateKeyToAccount } = require("viem/accounts");
