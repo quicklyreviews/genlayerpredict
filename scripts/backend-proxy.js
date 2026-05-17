@@ -11,6 +11,8 @@ const RPC_URL = "https://studio.genlayer.com/api";
 const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
 if (!CONTRACT_ADDRESS) throw new Error("❌ Missing CONTRACT_ADDRESS in .env");
 
+let cachedRound = null;
+
 const rawPk = process.env.PRIVATE_KEY || "";
 const privateKey = rawPk.startsWith("0x") ? rawPk : `0x${rawPk}`;
 const account = privateKeyToAccount(privateKey);
@@ -133,7 +135,7 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "GET" && url.pathname === "/api/round") {
     try {
-      const data = await handleRead("get_round", []);
+      const data = cachedRound || await handleRead("get_round", []);
       json(res, data);
     } catch (e) {
       json(res, { error: e.message }, 500);
@@ -165,7 +167,12 @@ const server = http.createServer(async (req, res) => {
         if (type === "write") {
           result = await handleWrite(method, args);
         } else {
-          result = await handleRead(method, args);
+          // Serve get_round from cache if available to prevent RPC spam
+          if (method === "get_round" && cachedRound) {
+            result = cachedRound;
+          } else {
+            result = await handleRead(method, args);
+          }
         }
         json(res, result);
       } catch (e) {
@@ -242,6 +249,7 @@ async function startCron() {
     inFlight = true;
     try {
       const round = await handleRead("get_round", []);
+      cachedRound = round;
       const now      = Math.floor(Date.now() / 1000);
       const roundId  = Number(round.round_id || 0);
       const status   = round.status || "IDLE";
