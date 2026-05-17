@@ -150,7 +150,7 @@ class BtcUpDownMarket(gl.Contract):
         self.winner = "UP" if float(price) > float(self.start_price) else ("DOWN" if float(price) < float(self.start_price) else "DRAW")
         self.status = "RESOLVED"
 
-        # Save result in field (no ContractState — breaks on GenLayer)
+        # Save result in field and ContractState
         rid = int(self.round_id)
         self.last_result = json.dumps({
             "round_id":    rid,
@@ -162,6 +162,7 @@ class BtcUpDownMarket(gl.Contract):
             "up_count":    int(self.up_count),
             "down_count":  int(self.down_count),
         })
+        gl.ContractState[f"round_result_{rid}"] = self.last_result
 
     # ─── Phase 5: Claim ─────────────────────────────────────────────────
 

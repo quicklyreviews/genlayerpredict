@@ -10,8 +10,8 @@ import { TransactionStatus } from 'genlayer-js/types';
 
 // ─── Configuration ──────────────────────────────────────────────────
 let CONFIG = {
-  backendUrl: "http://localhost:3005",
-  contractAddress: "0x48B657D6b52918A539617566D87Ae0c4e227c66D",
+  backendUrl: "https://genlayerpredict.onrender.com",
+  contractAddress: "0xD85f142Bb6D3d6c4Ab88828469001b628352256F",
 };
 
 const STUDIO_CHAIN_ID = "0xF22F"; // 61999
@@ -236,7 +236,19 @@ function updateRoundUI(data) {
   // Disable/enable bet controls
   const now = Math.floor(Date.now() / 1000);
   const remaining = Math.max(0, roundStart + bettingSec - now);
-  const hasLocalBet = localBet && localBet.roundId === roundId;
+  
+  let hasOptimistic = false;
+  try {
+    const optStr = localStorage.getItem("optimistic_bet");
+    if (optStr) {
+      const opt = JSON.parse(optStr);
+      if (Number(opt.roundId) === Number(roundId) && Date.now() - opt.timestamp < 300000) {
+        hasOptimistic = true;
+      }
+    }
+  } catch(e) {}
+
+  const hasLocalBet = (localBet && localBet.roundId === roundId) || hasOptimistic;
   const canBet = status === "OPEN" && remaining > 0 && !hasLocalBet;
   const bu = $("btn-up"); if (bu) bu.disabled = !canBet;
   const bd = $("btn-down"); if (bd) bd.disabled = !canBet;
@@ -324,6 +336,11 @@ function updateMyBetUI(data) {
   } catch(e) {
     const ma = $("my-bet-amount"); if (ma) ma.textContent = "0";
   }
+
+  // Disable buttons if already voted on-chain
+  const bu = $("btn-up"); if (bu) bu.disabled = true;
+  const bd = $("btn-down"); if (bd) bd.disabled = true;
+  const ba = $("bet-amount"); if (ba) ba.disabled = true;
 }
 
 // ─── Activity Log ───────────────────────────────────────────────────
