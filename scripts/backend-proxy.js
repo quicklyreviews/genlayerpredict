@@ -43,27 +43,51 @@ const client = createClient({
   account,
 });
 
-// ─── Fetch BTC price from Binance ──────────────────────────────────
+// ─── Fetch BTC price with multi-source fallback + NaN validation ──
+// Render datacenters are often blocked by Binance — must validate and try alternatives.
 async function fetchBTCPrice() {
-  try {
-    const r = await fetch("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT");
-    const d = await r.json();
-    const price = parseFloat(d.price).toFixed(2);
-    console.log(`[PRICE] BTC = $${price}`);
-    return price;
-  } catch (e) {
-    console.warn(`[PRICE] Binance failed, trying CoinGecko...`);
+  const sources = [
+    {
+      name: "Binance",
+      url: "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
+      extract: (d) => d?.price,
+    },
+    {
+      name: "CoinGecko",
+      url: "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
+      extract: (d) => d?.bitcoin?.usd,
+    },
+    {
+      name: "Coinbase",
+      url: "https://api.coinbase.com/v2/prices/BTC-USD/spot",
+      extract: (d) => d?.data?.amount,
+    },
+    {
+      name: "Kraken",
+      url: "https://api.kraken.com/0/public/Ticker?pair=XBTUSD",
+      extract: (d) => d?.result?.XXBTZUSD?.c?.[0],
+    },
+  ];
+
+  for (const src of sources) {
     try {
-      const r2 = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd");
-      const d2 = await r2.json();
-      const price = String(d2.bitcoin.usd);
-      console.log(`[PRICE] BTC = $${price} (CoinGecko)`);
-      return price;
-    } catch (e2) {
-      console.error(`[PRICE] All price feeds failed`);
-      return null;
+      const r = await fetch(src.url, { signal: AbortSignal.timeout(8000) });
+      const d = await r.json();
+      const raw = src.extract(d);
+      const price = parseFloat(raw);
+      if (Number.isFinite(price) && price > 0) {
+        const formatted = price.toFixed(2);
+        console.log(`[PRICE] BTC = $${formatted} (${src.name})`);
+        return formatted;
+      }
+      console.warn(`[PRICE] ${src.name} returned invalid: ${JSON.stringify(d).slice(0, 160)}`);
+    } catch (e) {
+      console.warn(`[PRICE] ${src.name} failed: ${e.message}`);
     }
   }
+
+  console.error(`[PRICE] All price feeds failed — returning null`);
+  return null;
 }
 
 function cors(res) {
