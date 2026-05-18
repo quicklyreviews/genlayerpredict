@@ -435,7 +435,7 @@ async function startCron() {
           console.log(`[CRON]   TX: ${tx.txHash}`);
           logTx("resolve_round", tx.txHash, roundId);
           lastActionTime = now; lastActionType = "resolve"; lastActionRound = roundId;
-          resolveFailures = 0; resolveBackoffUntil = 0;
+          resolveBackoffUntil = 0; // failures counter persists until success or auto-reset
           pendingAction = "resolve_round";
           waitAndVerifyState("resolve_round", roundId).then(async (ok) => {
             pendingAction = null;
