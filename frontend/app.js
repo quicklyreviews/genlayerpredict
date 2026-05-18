@@ -89,19 +89,23 @@ async function readContract(functionName, args = []) {
 // ─── GenLayer Client ─────────────────────────────────────────────────
 
 let _glClient = null;
+let _glClientAccount = null;
+let _glClientProvider = null;
 
 function getGenLayerClient() {
-  if (!_glClient) {
+  // genlayer-js's transport only auto-resolves window.ethereum. If the user is on
+  // OKX Wallet (or any wallet not injected as window.ethereum), routing falls
+  // through to the GenLayer RPC which has no eth_sendTransaction → error.
+  // Pass the actual provider explicitly so wallet signing goes to MetaMask/OKX.
+  const provider = getProvider();
+  if (!_glClient || _glClientAccount !== userAccount || _glClientProvider !== provider) {
     _glClient = createClient({
       chain: studionet,
       account: userAccount,
+      provider: provider,
     });
-  }
-  if (_glClient._account !== userAccount) {
-    _glClient = createClient({
-      chain: studionet,
-      account: userAccount,
-    });
+    _glClientAccount = userAccount;
+    _glClientProvider = provider;
   }
   return _glClient;
 }
