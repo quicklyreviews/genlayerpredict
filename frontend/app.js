@@ -11,7 +11,7 @@ import { TransactionStatus } from 'genlayer-js/types';
 // ─── Configuration ──────────────────────────────────────────────────
 let CONFIG = {
   backendUrl: "https://genlayerpredict.onrender.com",
-  contractAddress: "0xD85f142Bb6D3d6c4Ab88828469001b628352256F",
+  contractAddress: "0xdb2cba7397856b17d2A141BBE4A8Fa47c85Cf029",
 };
 
 const STUDIO_CHAIN_ID = "0xF22F"; // 61999

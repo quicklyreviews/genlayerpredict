@@ -9,7 +9,7 @@ const { TransactionStatus } = require("genlayer-js/types");
 const PORT = 3005;
 const RPC_URL = "https://studio.genlayer.com/api";
 // IMPORTANT: Hardcoded to latest deploy. Update here after each redeploy.
-const CONTRACT_ADDRESS = "0xD85f142Bb6D3d6c4Ab88828469001b628352256F";
+const CONTRACT_ADDRESS = "0xdb2cba7397856b17d2A141BBE4A8Fa47c85Cf029";
 
 let cachedRound = null;
 const roundHistory = {}; // rid -> result JSON, cached by backend when round resolves
