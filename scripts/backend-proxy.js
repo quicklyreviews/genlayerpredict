@@ -299,13 +299,14 @@ async function startCron() {
     }
   } catch (e) { console.log("[BOOT] Could not read chain state:", e.message); }
 
+  let inFlight = false;
+
   setInterval(async () => {
     if (pendingAction) {
       console.log(`[CRON] Waiting for ${pendingAction} to confirm on-chain...`);
       return;
     }
 
-    let inFlight = false;
     if (inFlight) return;
     inFlight = true;
     try {

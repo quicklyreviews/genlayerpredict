@@ -645,10 +645,10 @@ function startHistoryRetry(roundId, direction, amountGen, entryPrice) {
     if (attempts >= MAX) {
       clearInterval(_historyRetryTimer);
       _historyRetryTimer = null;
-      // Update optimistic row to PENDING state
+      // Update optimistic row STATUS column (7th cell) to PENDING
       const opt = document.getElementById("optimistic-row");
       if (opt) {
-        const statusCell = opt.querySelector("td:nth-child(6)");
+        const statusCell = opt.querySelector("td:nth-child(7)");
         if (statusCell) statusCell.innerHTML = '<span class="text-yellow-400">⏳ PENDING</span>';
       }
     }
@@ -657,6 +657,7 @@ function startHistoryRetry(roundId, direction, amountGen, entryPrice) {
 
 // ─── Wallet Cache ──────────────────────────────────────────
 const WALLET_CACHE_KEY = "genlayer_last_wallet";
+const HISTORY_CACHE_PREFIX = "genlayer_history_";
 
 function cacheWallet(address) {
   try { localStorage.setItem(WALLET_CACHE_KEY, address.toLowerCase()); } catch(e) {}
@@ -668,6 +669,32 @@ function getCachedWallet() {
 
 function clearWalletCache() {
   try { localStorage.removeItem(WALLET_CACHE_KEY); } catch(e) {}
+}
+
+// History persistence: survives F5 even during backend cold-start
+function cacheHistory(addr, history) {
+  if (!addr || !Array.isArray(history)) return;
+  try {
+    localStorage.setItem(HISTORY_CACHE_PREFIX + addr.toLowerCase(), JSON.stringify(history));
+  } catch(e) {}
+}
+
+function getCachedHistory(addr) {
+  if (!addr) return null;
+  try {
+    const raw = localStorage.getItem(HISTORY_CACHE_PREFIX + addr.toLowerCase());
+    return raw ? JSON.parse(raw) : null;
+  } catch(e) { return null; }
+}
+
+// Wait briefly for wallet provider injection (MetaMask may load after DOMContentLoaded)
+async function waitForProvider(maxMs = 2000) {
+  const start = Date.now();
+  while (Date.now() - start < maxMs) {
+    if (window.ethereum || window.okxwallet) break;
+    await new Promise(r => setTimeout(r, 100));
+  }
+  return getProvider();
 }
 
 async function fetchUserHistory() {
@@ -703,10 +730,12 @@ async function fetchUserHistory() {
     // If optimistic row is present and history doesn't have it yet, we preserve it
     if (opt && history.length > 0) {
       const optHtml = opt.outerHTML;
+      // Get round ID from optimistic row's first cell ("#5" → "5")
+      const optRoundId = opt.querySelector("td")?.textContent.replace("#", "").trim();
       opt.remove();
       renderUserHistory(history);
       const tbody = document.getElementById("history-body");
-      if (tbody && !history.some(h => String(h.round_id) === String($("round-id").textContent.replace("#", "")))) {
+      if (tbody && optRoundId && !history.some(h => String(h.round_id) === String(optRoundId))) {
         tbody.insertAdjacentHTML('afterbegin', optHtml);
       }
     } else {
@@ -780,6 +809,9 @@ function renderUserHistory(history) {
 
   tbody.innerHTML = rows;
   if (stats) stats.textContent = `${history.length} bet${history.length > 1 ? 's' : ''} · ${wins} win${wins !== 1 ? 's' : ''}`;
+
+  // Persist for F5 — next page load can render this immediately while wallet reconnects
+  if (userAccount) cacheHistory(userAccount, history);
 }
 
 function startPolling() {
@@ -928,9 +960,18 @@ document.addEventListener("DOMContentLoaded", async () => {
   setInterval(fetchBTCPrice, 30000);
   startPolling();
 
-  // Bug #2 fix: auto-reconnect uses connectWallet() for full event registration
+  // Render cached history immediately on F5 so users don't see an empty table
+  // while wallet reconnects / backend cold-starts. Will be replaced by fresh data on first poll.
   const cached = getCachedWallet();
-  const initProvider = getProvider();
+  if (cached) {
+    const cachedHistory = getCachedHistory(cached);
+    if (cachedHistory && cachedHistory.length > 0) {
+      renderUserHistory(cachedHistory);
+    }
+  }
+
+  // Auto-reconnect — wait for provider injection (MetaMask may load late after F5)
+  const initProvider = await waitForProvider();
   if (cached && initProvider) {
     initProvider.request({ method: "eth_accounts" }).then(async (accounts) => {
       if (accounts && accounts.length > 0) {

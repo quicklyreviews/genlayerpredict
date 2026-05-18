@@ -368,7 +368,8 @@ class BtcUpDownMarket(gl.Contract):
             except:
                 claimed = False
 
-            won = (vote == winner)
+            # DRAW refunds the bet, so it counts as "won" for claim purposes
+            won = (vote == winner) or (winner == "DRAW")
 
             if result_json == "":
                 bet_status = "PENDING"
