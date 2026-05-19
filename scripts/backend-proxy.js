@@ -42,27 +42,51 @@ const client = createClient({
   account,
 });
 
-// ─── Fetch BTC price from Binance ──────────────────────────────────
+// ─── Fetch BTC price with multi-source fallback + NaN validation ──
+// Render datacenters are often blocked by Binance — must validate and try alternatives.
 async function fetchBTCPrice() {
-  try {
-    const r = await fetch("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT");
-    const d = await r.json();
-    const price = parseFloat(d.price).toFixed(2);
-    console.log(`[PRICE] BTC = $${price}`);
-    return price;
-  } catch (e) {
-    console.warn(`[PRICE] Binance failed, trying CoinGecko...`);
+  const sources = [
+    {
+      name: "Binance",
+      url: "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
+      extract: (d) => d?.price,
+    },
+    {
+      name: "CoinGecko",
+      url: "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
+      extract: (d) => d?.bitcoin?.usd,
+    },
+    {
+      name: "Coinbase",
+      url: "https://api.coinbase.com/v2/prices/BTC-USD/spot",
+      extract: (d) => d?.data?.amount,
+    },
+    {
+      name: "Kraken",
+      url: "https://api.kraken.com/0/public/Ticker?pair=XBTUSD",
+      extract: (d) => d?.result?.XXBTZUSD?.c?.[0],
+    },
+  ];
+
+  for (const src of sources) {
     try {
-      const r2 = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd");
-      const d2 = await r2.json();
-      const price = String(d2.bitcoin.usd);
-      console.log(`[PRICE] BTC = $${price} (CoinGecko)`);
-      return price;
-    } catch (e2) {
-      console.error(`[PRICE] All price feeds failed`);
-      return null;
+      const r = await fetch(src.url, { signal: AbortSignal.timeout(8000) });
+      const d = await r.json();
+      const raw = src.extract(d);
+      const price = parseFloat(raw);
+      if (Number.isFinite(price) && price > 0) {
+        const formatted = price.toFixed(2);
+        console.log(`[PRICE] BTC = $${formatted} (${src.name})`);
+        return formatted;
+      }
+      console.warn(`[PRICE] ${src.name} returned invalid: ${JSON.stringify(d).slice(0, 160)}`);
+    } catch (e) {
+      console.warn(`[PRICE] ${src.name} failed: ${e.message}`);
     }
   }
+
+  console.error(`[PRICE] All price feeds failed — returning null`);
+  return null;
 }
 
 function cors(res) {
@@ -268,8 +292,29 @@ async function startCron() {
   let lastActionType  = "";
   let lastActionTime  = 0;
   let resolveFailures = 0;
+  let lockFailures    = 0;
   let resolveBackoffUntil = 0;
   let pendingAction   = null; // blocks cron while verifying state
+
+  // Self-heal: when a round is bricked (e.g., corrupt on-chain price prevents
+  // resolve_round from finalizing) we call admin_reset_to_idle on-chain so the
+  // next tick can start a fresh round. No human intervention needed.
+  async function autoReset(reason) {
+    console.error(`[CRON] 🚨 Auto-reset triggered: ${reason}`);
+    try {
+      const tx = await handleWrite("admin_reset_to_idle", []);
+      console.log(`[CRON]   Reset TX: ${tx.txHash}`);
+      logTx("admin_reset", tx.txHash, lastActionRound);
+      resolveFailures = 0;
+      lockFailures = 0;
+      resolveBackoffUntil = 0;
+      lastActionType = "";
+      lastActionRound = 0;
+      pendingAction = null;
+    } catch (e) {
+      console.error(`[CRON]   admin_reset_to_idle failed: ${e.message}`);
+    }
+  }
 
   // Bootstrap: read chain state so we don't re-send actions after restart
   try {
@@ -298,13 +343,14 @@ async function startCron() {
     }
   } catch (e) { console.log("[BOOT] Could not read chain state:", e.message); }
 
+  let inFlight = false;
+
   setInterval(async () => {
     if (pendingAction) {
       console.log(`[CRON] Waiting for ${pendingAction} to confirm on-chain...`);
       return;
     }
 
-    let inFlight = false;
     if (inFlight) return;
     inFlight = true;
     try {
@@ -358,12 +404,17 @@ async function startCron() {
           logTx("lock_round", tx.txHash, roundId);
           lastActionTime = now; lastActionType = "lock"; lastActionRound = roundId;
           pendingAction = "lock_round";
-          waitAndVerifyState("lock_round", roundId).then(ok => {
+          waitAndVerifyState("lock_round", roundId).then(async (ok) => {
             pendingAction = null;
-            if (!ok) {
-              console.error(`[STATE ERROR] lock_round #${roundId}: TX finalized but status still OPEN. Oracle may have failed.`);
-              // Reset debounce so it retries after guard
+            if (ok) {
+              lockFailures = 0;
+            } else {
+              lockFailures++;
+              console.error(`[STATE ERROR] lock_round #${roundId} failed (${lockFailures}/3). Status still OPEN.`);
               lastActionType = ""; lastActionRound = 0;
+              if (lockFailures >= 3) {
+                await autoReset(`lock_round #${roundId} failed 3x`);
+              }
             }
           });
         }
@@ -383,11 +434,12 @@ async function startCron() {
           console.log(`[CRON]   TX: ${tx.txHash}`);
           logTx("resolve_round", tx.txHash, roundId);
           lastActionTime = now; lastActionType = "resolve"; lastActionRound = roundId;
-          resolveFailures = 0; resolveBackoffUntil = 0;
+          resolveBackoffUntil = 0; // failures counter persists until success or auto-reset
           pendingAction = "resolve_round";
           waitAndVerifyState("resolve_round", roundId).then(async (ok) => {
             pendingAction = null;
             if (ok) {
+              resolveFailures = 0;
               // Cache the result for past-round lookup
               try {
                 const r = await handleRead("get_round", []);
@@ -395,10 +447,15 @@ async function startCron() {
               } catch (e) { console.warn(`[CACHE] Failed to cache round ${roundId}:`, e.message); }
             } else {
               resolveFailures++;
-              const delay = Math.min(300, 30 * Math.pow(2, resolveFailures));
-              resolveBackoffUntil = Math.floor(Date.now() / 1000) + delay;
-              console.error(`[STATE ERROR] resolve_round #${roundId} failed. Backoff ${delay}s`);
+              console.error(`[STATE ERROR] resolve_round #${roundId} failed (${resolveFailures}/3). Status still LOCKED.`);
               lastActionType = ""; lastActionRound = 0;
+              if (resolveFailures >= 3) {
+                await autoReset(`resolve_round #${roundId} failed 3x`);
+              } else {
+                const delay = Math.min(300, 30 * Math.pow(2, resolveFailures));
+                resolveBackoffUntil = Math.floor(Date.now() / 1000) + delay;
+                console.error(`[CRON]   Backoff ${delay}s before retry`);
+              }
             }
           });
         }
