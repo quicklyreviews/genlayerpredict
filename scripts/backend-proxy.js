@@ -6,14 +6,6 @@ const { privateKeyToAccount } = require("viem/accounts");
 const { localnet } = require("genlayer-js/chains");
 const { TransactionStatus } = require("genlayer-js/types");
 
-const PORT = 3005;
-const RPC_URL = "https://studio.genlayer.com/api";
-// IMPORTANT: Hardcoded to latest deploy. Update here after each redeploy.
-const CONTRACT_ADDRESS = "0xD85f142Bb6D3d6c4Ab88828469001b628352256F";
-
-let cachedRound = null;
-const roundHistory = {}; // rid -> result JSON, cached by backend when round resolves
-
 // Manually parse .env to avoid dotenv v17 corruption
 function loadEnv() {
   try {
@@ -31,6 +23,13 @@ function loadEnv() {
   } catch (e) { console.warn("Could not load .env:", e.message); }
 }
 loadEnv();
+
+const PORT = 3005;
+const RPC_URL = process.env.GENLAYER_RPC_URL || "https://studio.genlayer.com/api";
+const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS || "0x6a50708F562E635FD1319fFeB723b9D6568CE3A2";
+
+let cachedRound = null;
+const roundHistory = {}; // rid -> result JSON, cached by backend when round resolves
 
 const rawPk = process.env.PRIVATE_KEY || "";
 const privateKey = rawPk.startsWith("0x") ? rawPk : `0x${rawPk}`;
@@ -111,12 +110,12 @@ async function handleRead(method, args) {
   }
 }
 
-async function handleWrite(method, args) {
+async function handleWrite(method, args, valueWei = "0") {
   const hash = await client.writeContract({
     address: CONTRACT_ADDRESS,
     functionName: method,
     args: args || [],
-    value: 0n,
+    value: BigInt(valueWei),
   });
   return { txHash: hash };
 }
@@ -223,10 +222,10 @@ const server = http.createServer(async (req, res) => {
     req.on("data", (chunk) => (body += chunk));
     req.on("end", async () => {
       try {
-        const { method, args, type } = JSON.parse(body);
+        const { method, args, type, value } = JSON.parse(body);
         let result;
         if (type === "write") {
-          result = await handleWrite(method, args);
+          result = await handleWrite(method, args, value || "0");
         } else {
           // Serve get_round from cache if available to prevent RPC spam
           if (method === "get_round" && cachedRound) {

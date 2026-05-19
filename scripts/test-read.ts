@@ -24,15 +24,33 @@ async function main() {
     method: "gen_getContractSchema",
     params: [contractAddress],
   });
-  console.log("Schema methods:", Object.keys(schema.methods));
+  console.dir(schema, { depth: null });
 
   console.log("\nTesting readContract...");
-  const result = await client.readContract({
+  const round: any = await client.readContract({
     address: contractAddress as `0x${string}`,
     functionName: "get_round",
     args: [],
   });
-  console.log("Result:", JSON.stringify(result, null, 2));
+  console.log("Round:", round.round_id);
+
+  const parts: any = await client.readContract({
+    address: contractAddress as `0x${string}`,
+    functionName: "get_round_participants",
+    args: [round.round_id],
+  });
+  console.log("Participants:", parts);
+
+  if (parts && parts.length > 0) {
+    for (let p of JSON.parse(parts)) {
+      const hist: any = await client.readContract({
+        address: contractAddress as `0x${string}`,
+        functionName: "get_user_history",
+        args: [p],
+      });
+      console.log(`History for ${p}:`, hist);
+    }
+  }
 }
 
 main().catch((err) => {

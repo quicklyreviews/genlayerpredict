@@ -77,23 +77,22 @@ class BtcPredictionGame(gl.Contract):
         # Fetch BTC opening price
         now = u256(int(time.time()))
 
-        def fetch_btc_price() -> str:
-            web_data = gl.nondet.web.render(
-                "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
-                mode="text"
-            )
-            task = f"""
-Extract the Bitcoin USD price from the following API response.
-Respond with ONLY the numeric price value (e.g., "67543.21"), nothing else.
-No formatting, no currency symbols, just the number.
+        def leader_fn() -> float:
+            response = gl.nondet.web.get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd")
+            data = json.loads(response.body)
+            return float(data["bitcoin"]["usd"])
 
-API Response:
-{web_data}
-"""
-            result = gl.nondet.exec_prompt(task).strip()
-            return result
+        def validator_fn(leader_result) -> bool:
+            if not isinstance(leader_result, gl.vm.Return):
+                return False
+            leader_price = float(leader_result.calldata)
+            validator_price = leader_fn()
+            # 0.2% tolerance for API time drift between leader and validator
+            if leader_price == 0:
+                return validator_price == 0
+            return abs(leader_price - validator_price) / abs(leader_price) <= 0.002
 
-        open_price = gl.eq_principle.strict_eq(fetch_btc_price)
+        open_price = str(gl.vm.run_nondet_unsafe(leader_fn, validator_fn))
 
         # Store round data
         round_key = f"round_{new_round_id}"
@@ -196,23 +195,22 @@ API Response:
             raise gl.vm.UserError("Round has not ended yet")
 
         # Fetch closing BTC price
-        def fetch_btc_close_price() -> str:
-            web_data = gl.nondet.web.render(
-                "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
-                mode="text"
-            )
-            task = f"""
-Extract the Bitcoin USD price from the following API response.
-Respond with ONLY the numeric price value (e.g., "67543.21"), nothing else.
-No formatting, no currency symbols, just the number.
+        def leader_fn() -> float:
+            response = gl.nondet.web.get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd")
+            data = json.loads(response.body)
+            return float(data["bitcoin"]["usd"])
 
-API Response:
-{web_data}
-"""
-            result = gl.nondet.exec_prompt(task).strip()
-            return result
+        def validator_fn(leader_result) -> bool:
+            if not isinstance(leader_result, gl.vm.Return):
+                return False
+            leader_price = float(leader_result.calldata)
+            validator_price = leader_fn()
+            # 0.2% tolerance for API time drift between leader and validator
+            if leader_price == 0:
+                return validator_price == 0
+            return abs(leader_price - validator_price) / abs(leader_price) <= 0.002
 
-        close_price = gl.eq_principle.strict_eq(fetch_btc_close_price)
+        close_price = str(gl.vm.run_nondet_unsafe(leader_fn, validator_fn))
 
         # Compare prices
         open_price_float = float(round_data["open_price"])

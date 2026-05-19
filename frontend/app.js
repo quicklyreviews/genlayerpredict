@@ -10,8 +10,8 @@ import { TransactionStatus } from 'genlayer-js/types';
 
 // ─── Configuration ──────────────────────────────────────────────────
 let CONFIG = {
-  backendUrl: "https://genlayerpredict.onrender.com",
-  contractAddress: "0xD85f142Bb6D3d6c4Ab88828469001b628352256F",
+  backendUrl: "http://localhost:3005",
+  contractAddress: "0x6a50708F562E635FD1319fFeB723b9D6568CE3A2",
 };
 
 const STUDIO_CHAIN_ID = "0xF22F"; // 61999
@@ -160,8 +160,12 @@ async function ensureStudioChain() {
 
 // ─── UI Updaters ────────────────────────────────────────────────────
 
+// Cache latest round data for 1-second timer ticks
+let _lastRoundData = null;
+
 function updateRoundUI(data) {
   if (!data) return;
+  _lastRoundData = data; // cache for timer ticks
 
   const roundId = Number(data.round_id || 0);
   const status = data.status || "IDLE";
@@ -176,6 +180,14 @@ function updateRoundUI(data) {
   const upPool = data.up_pool || "0";
   const downPool = data.down_pool || "0";
   const totalRounds = Number(data.total_rounds || 0);
+
+  // Sync chart phase badge with contract status
+  const chartBadge = $("chart-phase-badge");
+  if (chartBadge) {
+    chartBadge.textContent = status;
+    const badgeColors = { OPEN: "bg-green-800 text-green-300", LOCKED: "bg-yellow-800 text-yellow-300", RESOLVED: "bg-blue-800 text-blue-300", IDLE: "bg-gray-800 text-gray-300" };
+    chartBadge.className = `px-2 py-0.5 rounded text-[10px] ${badgeColors[status] || badgeColors.IDLE}`;
+  }
 
   // Round ID
   const rid = $("round-id"); if (rid) rid.textContent = `#${roundId || 0}`;
@@ -321,7 +333,7 @@ function formatTime(sec) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-function updateMyBetUI(data) {
+function updateMyBetUI(data, displayData) {
   const el = $("my-bet-info");
   if (!el) return;
   if (!data || !data.vote) {
@@ -341,6 +353,18 @@ function updateMyBetUI(data) {
   const bu = $("btn-up"); if (bu) bu.disabled = true;
   const bd = $("btn-down"); if (bd) bd.disabled = true;
   const ba = $("bet-amount"); if (ba) ba.disabled = true;
+
+  // Add winner notification
+  const winnerText = $("winner-text");
+  if (winnerText && displayData && displayData.status === "RESOLVED") {
+      if (displayData.winner === "DRAW") {
+          // Do nothing
+      } else if (data.vote === displayData.winner) {
+          winnerText.innerHTML += ` <strong class="text-green-400 font-extrabold text-lg uppercase ml-2 animate-pulse drop-shadow-[0_0_10px_rgba(74,222,128,0.8)] border border-green-500 rounded px-2 py-1 bg-green-900/30">(YOU WON!)</strong>`;
+      } else {
+          winnerText.innerHTML += ` <strong class="text-red-500 font-bold uppercase ml-2 bg-red-900/20 px-2 py-0.5 rounded border border-red-800/50">(You lost)</strong>`;
+      }
+  }
 }
 
 // ─── Activity Log ───────────────────────────────────────────────────
@@ -381,6 +405,11 @@ async function placeBet(direction) {
     }
     const amountWeiHex = "0x" + amountWei.toString(16);
 
+    // Disable buttons immediately to prevent double clicks while signing
+    const bu = $("btn-up"); if (bu) bu.disabled = true;
+    const bd = $("btn-down"); if (bd) bd.disabled = true;
+    const ba = $("bet-amount"); if (ba) ba.disabled = true;
+
     if (feedback) { feedback.textContent = "Confirm in wallet..."; feedback.className = "vote-feedback"; }
 
     const fn = direction === "UP" ? "bet_up" : "bet_down";
@@ -409,11 +438,6 @@ async function placeBet(direction) {
     // Set localBet immediately to block re-betting
     localBet = { roundId: roundIdNow, direction, amount: amountGen };
 
-    // Disable buttons immediately
-    const bu = $("btn-up"); if (bu) bu.disabled = true;
-    const bd = $("btn-down"); if (bd) bd.disabled = true;
-    const ba = $("bet-amount"); if (ba) ba.disabled = true;
-
     if (feedback) { 
       const shortTx = txHash.slice(0, 10) + "...";
       const explorerLink = `<a href="${EXPLORER_URL}/tx/${txHash}" target="_blank" class="underline text-green-300 hover:text-green-100">${shortTx}</a>`;
@@ -441,6 +465,8 @@ async function placeBet(direction) {
   } catch (err) {
     if (feedback) { feedback.textContent = `❌ ${err.message}`; feedback.className = "vote-feedback error"; }
     addLog(`Vote failed: ${err.message}`);
+    // Re-enable buttons if failed (and still open)
+    pollRound();
   }
 }
 
@@ -517,9 +543,10 @@ async function claimWinnings(roundId) {
 // ─── Polling ────────────────────────────────────────────────────────
 
 async function pollRound() {
+  let displayData = null;
   try {
     const liveData = await readContract("get_round");
-    let displayData = liveData;
+    displayData = liveData;
 
     if (selectedRoundId !== null && selectedRoundId !== Number(liveData.round_id || 0)) {
       const res = await readContract("get_round_result", [selectedRoundId]);
@@ -569,7 +596,7 @@ async function pollRound() {
     // Bug #1 fix: separate try-catch so fetchUserHistory always runs
     try {
       const myBet = await readContract("get_my_bet", [userAccount]);
-      updateMyBetUI(myBet);
+      updateMyBetUI(myBet, displayData);
       if (myBet.vote) {
         const payout = await readContract("get_payout", [userAccount]);
         const mp = $("my-bet-payout");
@@ -582,6 +609,7 @@ async function pollRound() {
     // fetchUserHistory ALWAYS runs, independent try-catch
     try {
       await fetchUserHistory();
+      updateWalletBalance();
     } catch (e) {
       console.warn("fetchUserHistory error:", e.message);
     }
@@ -766,7 +794,11 @@ function renderUserHistory(history) {
       
     const entryPrice = metas[h.round_id] || "—";
     
-    return `<tr class="hover:bg-white/5 transition-colors">
+    const isWin = h.status === "CLAIM" || h.status === "CLAIMED";
+    const isLoss = h.status === "LOST";
+    const rowClass = isWin ? "bg-green-900/20 hover:bg-green-900/30" : isLoss ? "bg-red-900/10 hover:bg-red-900/20" : "hover:bg-white/5";
+
+    return `<tr class="${rowClass} transition-colors border-b border-[#1a1a1a]/50">
       <td class="px-4 py-3 font-mono">#${h.round_id}</td>
       <td class="px-4 py-3 text-center">${voteBadge}</td>
       <td class="px-4 py-3 text-white text-center">${amtGen} GEN</td>
@@ -782,12 +814,40 @@ function renderUserHistory(history) {
   if (stats) stats.textContent = `${history.length} bet${history.length > 1 ? 's' : ''} · ${wins} win${wins !== 1 ? 's' : ''}`;
 }
 
+let _timerTick = null;
+
 function startPolling() {
   if (pollInterval) clearInterval(pollInterval);
+  if (_timerTick) clearInterval(_timerTick);
   pollRound();
+  // Poll backend every 10 seconds for fresh data
   pollInterval = setInterval(() => {
     pollRound();
-  }, 15000);
+  }, 10000);
+  // Tick timer every 1 second for smooth countdown
+  _timerTick = setInterval(() => {
+    if (_lastRoundData) {
+      const d = _lastRoundData;
+      updateTimer(d.status || "IDLE", Number(d.round_start_time || 0), Number(d.betting_seconds || 300), Number(d.lock_seconds || 300), Number(d.round_id || 0));
+    }
+  }, 1000);
+}
+
+// Helper: fetch and display wallet balance
+async function updateWalletBalance() {
+  if (!userAccount) return;
+  try {
+    const provider = getProvider();
+    const balanceWei = await provider.request({ method: "eth_getBalance", params: [userAccount, "latest"] });
+    const balanceGen = parseFloat(formatWeiToGen(balanceWei)).toFixed(2);
+    const el = $("wallet-balance");
+    if (el) {
+      el.textContent = `${balanceGen} GEN`;
+      el.classList.remove("hidden");
+    }
+  } catch (e) {
+    console.warn("Failed to fetch balance:", e);
+  }
 }
 
 // Helper: detect wallet provider (MetaMask, OKX, etc.)
@@ -823,9 +883,10 @@ async function connectWallet() {
     await ensureStudioChain();
 
     if (dot) dot.className = "status-dot status-dot--connected";
-    if (label) label.textContent = userAccount.slice(0, 8) + "...";
+    if (label) { label.textContent = userAccount.slice(0, 8) + "..."; label.classList.remove("hidden"); }
     if (btn) btn.textContent = "Connected";
     addLog(`Connected: ${userAccount.slice(0, 10)}...`);
+    updateWalletBalance();
 
     // Immediately load history for this wallet (with retry for Render cold start)
     fetchUserHistoryWithRetry();
@@ -862,7 +923,8 @@ function disconnectWallet() {
   userAccount = null;
   if (pollInterval) clearInterval(pollInterval);
   const dot = $("connection-status"); if (dot) dot.className = "status-dot status-dot--disconnected";
-  const label = $("connection-label"); if (label) label.textContent = "Disconnected";
+  const label = $("connection-label"); if (label) { label.textContent = "Disconnected"; label.classList.add("hidden"); }
+  const bal = $("wallet-balance"); if (bal) bal.classList.add("hidden");
   const btn = $("btn-connect"); if (btn) btn.textContent = "Connect";
   addLog("Wallet disconnected");
 }
@@ -912,6 +974,7 @@ async function fetchBTCPrice() {
 // ─── Init ───────────────────────────────────────────────────────────
 
 document.addEventListener("DOMContentLoaded", async () => {
+  // Load contract address from backend (authoritative source)
   try {
     const r = await fetch(CONFIG.backendUrl + "/api/config");
     const d = await r.json();
@@ -923,9 +986,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     console.warn("Failed to load config from backend, using default.");
   }
 
+  // Clear stale localStorage overrides that cause wrong contract on reload
+  localStorage.removeItem("backend_url");
+  localStorage.removeItem("contract_address");
+
   loadTradingView();
   fetchBTCPrice();
-  setInterval(fetchBTCPrice, 30000);
+  setInterval(fetchBTCPrice, 15000); // refresh BTC price every 15s
   startPolling();
 
   // Bug #2 fix: auto-reconnect uses connectWallet() for full event registration
@@ -948,8 +1015,29 @@ document.addEventListener("DOMContentLoaded", async () => {
 window.connectWallet = connectWallet;
 window.disconnectWallet = disconnectWallet;
 window.placeBet = placeBet;
-window.claimBet = claimWinnings;
+window.claimWinnings = claimWinnings;
 window.selectRound = selectRound;
 window.openConfig = openConfig;
 window.closeConfig = closeConfig;
 window.saveConfig = saveConfig;
+
+// ─── Admin Tools ──────────────────────────────────────────────────
+async function fundContract() {
+  if (!userAccount) {
+    alert("Connect wallet first!");
+    return;
+  }
+  const amtStr = prompt("How many GEN to fund into the contract?", "10");
+  if (!amtStr) return;
+  const amtGen = parseFloat(amtStr);
+  if (isNaN(amtGen) || amtGen <= 0) return;
+  const amtWei = BigInt(Math.floor(amtGen * 1e18));
+  const amountWeiHex = "0x" + amtWei.toString(16);
+  try {
+    const txHash = await writeContract("fund", [], amountWeiHex);
+    alert("Fund transaction sent! Hash: " + txHash.substring(0,10) + "...");
+  } catch (e) {
+    alert("Fund error: " + e.message);
+  }
+}
+window.fundContract = fundContract;

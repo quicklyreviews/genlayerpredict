@@ -3,7 +3,7 @@
 <html lang="en"><head>
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-<title>GenLayer - BTC Prediction Terminal</title>
+<title>Gen Predict - BTC Prediction Terminal</title>
 <!-- Tailwind CSS v3 CDN -->
 <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
 <!-- Google Fonts: Inter -->
@@ -88,8 +88,8 @@
 <div class="flex items-center gap-2">
 <!-- GenLayer Logo -->
 <div class="flex items-center gap-2" data-purpose="logo-container">
-<img class="w-8 h-8" src="https://assets.zksync.io/images/genlayer_white.svg" alt="GenLayer" />
-<span class="text-2xl font-bold tracking-tight">GenLayer</span>
+<img class="w-8 h-8" src="https://assets.zksync.io/images/genlayer_white.svg" alt="Gen Predict" />
+<span class="text-2xl font-bold tracking-tight">Gen Predict</span>
 </div>
 </div>
 <nav class="hidden md:flex items-center gap-16 text-sm font-medium text-gray-400">
@@ -98,7 +98,11 @@
 <a class="hover:text-white transition-colors" href="#">Stats</a>
 </nav>
 <div data-purpose="header-actions" class="flex items-center gap-3">
+  <span id="wallet-balance" class="text-xs font-mono text-green-400 hidden">0 GEN</span>
   <span id="connection-label" class="text-xs text-gray-400 hidden">Disconnected</span>
+  <button id="btn-fund" class="btn-connect text-sm text-yellow-400 border-yellow-400" onclick="fundContract()">
+    Fund
+  </button>
   <button id="btn-connect" class="btn-connect text-sm" onclick="connectWallet()">
     Connect Wallet
   </button>
@@ -240,6 +244,12 @@
 <!-- END: LiveFeedSection -->
 </main>
 <!-- END: MainContent -->
+
+<!-- BEGIN: Footer -->
+<footer class="max-w-7xl mx-auto mt-8 py-6 border-t border-[#1a1a1a] text-center text-xs text-gray-500">
+  Created by <a href="https://x.com/trungkts29" target="_blank" rel="noopener noreferrer" class="text-gray-300 hover:text-white transition-colors font-medium">@trungkts29</a>
+</footer>
+<!-- END: Footer -->
 <script type="importmap">
 {
   "imports": {
@@ -249,5 +259,5 @@
   }
 }
 </script>
-<script type="module" src="app.js?v=21"></script>
+<script type="module" src="app.js?v=31"></script>
 </body></html>
