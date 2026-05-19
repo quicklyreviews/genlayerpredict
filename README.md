@@ -9,18 +9,18 @@ A decentralized BTC Up/Down Prediction Market built on **GenLayer** — the AI-p
 ## 🎮 How It Works
 
 ```text
-Round Lifecycle (10 minutes)
+Round Lifecycle (1 minute)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-│  OPEN (0-5 min)  │  LOCKED (5-10 min)  │ RESOLVED
-│  Players bet      │  No new bets        │ Winner decided
-│  UP or DOWN       │  Waiting...         │ Winnings ready
+│  OPEN (0-30 sec) │  LOCKED (30-60 sec) │ RESOLVED
+│  Players bet     │  No new bets        │ Winner decided
+│  UP or DOWN      │  Waiting...         │ Winnings ready
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
 1. **Start** — The backend cron job calls `start_round()`. The Intelligent Contract fetches the current BTC price as the "Opening Price".
-2. **Bet** — Players connect their wallets and call `bet_up()` or `bet_down()` with GEN tokens within the 5-minute betting window.
-3. **Lock** — The backend calls `lock_round()` after 5 minutes. No more bets are accepted.
-4. **Resolve** — After 10 minutes, the backend calls `resolve_round()`. The contract fetches the "Closing Price".
+2. **Bet** — Players connect their wallets and call `bet_up()` or `bet_down()` with GEN tokens within the 30-second betting window.
+3. **Lock** — The backend calls `lock_round()` after 30 seconds. No more bets are accepted.
+4. **Resolve** — After 1 minute, the backend calls `resolve_round()`. The contract fetches the "Closing Price".
 5. **Claim** — If the closing price matches the player's prediction, they can call `claim()` to withdraw their winnings directly to their wallet!
 
 ## 🧠 GenLayer Intelligent Consensus
