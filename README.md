@@ -1,109 +1,98 @@
-# BTC Up/Down Prediction Market
+# 📈 Gen Predict
 
-A mini prediction game built on **GenLayer** — the AI-powered blockchain.
+A decentralized BTC Up/Down Prediction Market built on **GenLayer** — the AI-powered blockchain.
 
-Players predict whether Bitcoin's price will go **UP** or **DOWN** over a 10-minute round. The contract fetches real BTC/USD prices using GenLayer's non-deterministic web access with validator consensus.
+**Gen Predict** allows players to bet (with GEN tokens) on whether the price of Bitcoin will go **UP** or **DOWN** within a specific timeframe. The game leverages GenLayer's unique **Intelligent Contracts** and **Equivalence Principle** to fetch real-world BTC prices securely via decentralized consensus, without relying on traditional oracles like Chainlink.
+
+---
 
 ## 🎮 How It Works
 
-```
+```text
 Round Lifecycle (10 minutes)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 │  OPEN (0-5 min)  │  LOCKED (5-10 min)  │ RESOLVED
 │  Players bet      │  No new bets        │ Winner decided
-│  UP or DOWN       │  Waiting...         │ Compare prices
+│  UP or DOWN       │  Waiting...         │ Winnings ready
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-1. **Start** — Bot calls `start_round()`, contract fetches BTC opening price
-2. **Bet** — Players call `bet_up()` or `bet_down()` within 5 minutes
-3. **Lock** — Bot calls `lock_round()` after 5 minutes
-4. **Resolve** — Bot calls `resolve_round()` after 10 minutes, fetches closing price
+1. **Start** — The backend cron job calls `start_round()`. The Intelligent Contract fetches the current BTC price as the "Opening Price".
+2. **Bet** — Players connect their wallets and call `bet_up()` or `bet_down()` with GEN tokens within the 5-minute betting window.
+3. **Lock** — The backend calls `lock_round()` after 5 minutes. No more bets are accepted.
+4. **Resolve** — After 10 minutes, the backend calls `resolve_round()`. The contract fetches the "Closing Price".
+5. **Claim** — If the closing price matches the player's prediction, they can call `claim()` to withdraw their winnings directly to their wallet!
 
-**Winner:** If close > open → UP wins. If close < open → DOWN wins. Equal → DRAW.
+## 🧠 GenLayer Intelligent Consensus
+
+This project demonstrates proper GenLayer **Equivalence Principle** design:
+- **No LLMs for JSON Data**: We use `gl.nondet.web.get` and Python's `json` parser instead of AI prompts to read the CoinGecko API. This saves gas and ensures deterministic extraction.
+- **Time Drift Tolerance**: Because validators fetch the BTC price at slightly different milliseconds, we use a custom `validator_fn` with `gl.vm.run_nondet_unsafe` allowing a **0.2% price tolerance**. This prevents consensus failures (UNDETERMINED state) due to natural API price drift.
 
 ## 📁 Project Structure
 
-```
+```text
 ├── contracts/
-│   └── btc_updown_market.py   # Main intelligent contract
-├── tests/
-│   └── test_btc_updown.py     # Direct VM tests
-├── deploy/
-│   └── deployScript.ts        # Contract deployment
+│   ├── btc_updown_market.py   # Main Intelligent Contract (Production)
+│   └── btc_prediction.py      # Example IC with consensus tolerance 
+├── frontend/
+│   ├── index.html             # Game UI (Tailwind CSS)
+│   └── app.js                 # Frontend logic (GenLayer JS SDK)
 ├── scripts/
-│   └── round-cron.ts          # Off-chain round manager bot
-└── frontend/
-    ├── index.html              # Game UI
-    ├── styles.css              # Design system
-    └── app.js                  # Frontend logic
+│   ├── backend-proxy.js       # Node.js API Proxy & Auto-Round Cron Bot
+│   └── build.js               # Injects environment variables into Frontend
+├── vercel.json                # Vercel Deployment configuration
+└── package.json               # Node.js dependencies
 ```
 
-## 🚀 Quick Start
+## 🚀 Deployment Guide
+
+The architecture is split into two parts: a **Web Service Backend** and a **Static Frontend**.
+
+### 1. Deploy the Backend & Cron Bot (Render)
+The backend (`backend-proxy.js`) serves as an RPC proxy to avoid rate-limiting and runs the automatic game loop.
+- Host on **Render** as a **Web Service**.
+- **Build Command**: `npm install`
+- **Start Command**: `node scripts/backend-proxy.js`
+- **Environment Variables**:
+  - `PRIVATE_KEY`: Your admin wallet private key (starts with `0x`).
+  - `CONTRACT_ADDRESS`: Deployed GenLayer contract address.
+  - `GENLAYER_RPC_URL`: `https://studio.genlayer.com/api` (or local/testnet URL).
+
+### 2. Deploy the Frontend (Vercel)
+The frontend is built using Vanilla JS and Tailwind CSS.
+- Host on **Vercel** as a new Project.
+- The `vercel.json` file is already configured with `"outputDirectory": "frontend"`.
+- **Environment Variables**:
+  - `BACKEND_URL`: Set this to your deployed Render URL (e.g., `https://gen-predict-backend.onrender.com`).
+- During deployment, Vercel will run `npm run build` which injects your `BACKEND_URL` directly into `app.js`.
+
+## 🛠 Local Development
 
 ### Prerequisites
-
-- [GenLayer CLI](https://docs.genlayer.com/developers/cli)
+- [GenLayer Simulator](https://docs.genlayer.com/) running locally (`genlayer up`)
 - Node.js 18+
-- GenLayer Studio running (`genlayer up`)
 
-### 1. Run Tests
+### Setup
+1. Clone the repo and install dependencies:
+   ```bash
+   npm install
+   ```
+2. Copy `.env.example` to `.env` and fill in your details:
+   ```env
+   GENLAYER_RPC_URL=http://localhost:4000/api
+   CONTRACT_ADDRESS=0x...
+   PRIVATE_KEY=0x...
+   ```
+3. Start the Backend Proxy:
+   ```bash
+   node scripts/backend-proxy.js
+   ```
+4. Run the frontend:
+   Simply open `frontend/index.html` in your browser using Live Server or serve it directly.
 
-```bash
-cd F:\Work\Cryoto\Genlayer
-gltest tests/test_btc_updown.py
-```
-
-### 2. Deploy Contract
-
-```bash
-npx tsx deploy/deployScript.ts
-```
-
-### 3. Start the Round Bot
-
-```bash
-CONTRACT_ADDRESS=0x... npx tsx scripts/round-cron.ts
-```
-
-### 4. Open Frontend
-
-Open `frontend/index.html` in a browser. Click **Settings** to enter your RPC URL and contract address.
-
-## 🔧 Contract API
-
-### Write Methods
-
-| Method | Description |
-|--------|-------------|
-| `start_round()` | Start new round, fetch opening BTC price |
-| `bet_up()` | Predict price will go up |
-| `bet_down()` | Predict price will go down |
-| `lock_round()` | Lock round after betting window (5 min) |
-| `resolve_round()` | Resolve round with closing price (10 min) |
-
-### View Methods
-
-| Method | Description |
-|--------|-------------|
-| `get_round()` | Get current round data |
-| `get_my_vote(addr)` | Get a player's vote |
-
-## ⚙️ Configuration
-
-| Env Variable | Default | Description |
-|---|---|---|
-| `GENLAYER_RPC_URL` | `http://localhost:4000/api` | GenLayer RPC endpoint |
-| `CONTRACT_ADDRESS` | — | Deployed contract address |
-| `ROUND_PAUSE_MS` | `5000` | Pause between rounds (ms) |
-
-## 📝 Architecture Notes
-
-- **No cron in contract** — Round transitions are triggered by an off-chain bot. The contract only validates timing and state.
-- **Non-deterministic price fetch** — Uses `gl.vm.run_nondet_unsafe()` with a leader/validator pattern. Leader fetches price, validators independently verify within tolerance (max $10 or 0.1%).
-- **Integer prices** — BTC price is stored as integer USD to minimize floating-point disagreement between validators.
-- **TreeMap votes** — Uses GenLayer's `TreeMap[Address, str]` for efficient vote storage with one-vote-per-player enforcement.
+## 👨‍💻 Author
+Created by [@trungkts29](https://x.com/trungkts29)
 
 ## 📄 License
-
 MIT
