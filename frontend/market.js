@@ -261,10 +261,15 @@ function tickBetPanel() {
   document.querySelectorAll("[data-tick-countdown-reopen]").forEach((n) => {
     n.textContent = fmtCountdown(Math.max(0, (round?.lock_ts ?? 0) - now()));
   });
-  const up = document.querySelector("#pick-up .btn__multiplier");
-  const down = document.querySelector("#pick-down .btn__multiplier");
-  if (up && round) up.textContent = fmtMultiplier(round.up_multiplier_x100);
-  if (down && round) down.textContent = fmtMultiplier(round.down_multiplier_x100);
+  if (!round) return;
+  for (const [id, x100] of [["pick-up", round.up_multiplier_x100], ["pick-down", round.down_multiplier_x100]]) {
+    const btn = $(id);
+    if (!btn) continue;
+    const m = fmtMultiplier(x100);
+    btn.querySelector(".btn__multiplier").textContent = m;
+    // Keep the accessible name in step with the visible number, not just the label.
+    btn.setAttribute("aria-label", `Bet ${id === "pick-up" ? "UP" : "DOWN"}, paying ${m}`);
+  }
 }
 
 function renderBetPanel() {
@@ -326,16 +331,18 @@ function renderBetPanel() {
       </div>
     </div>
 
-    <div class="actions" style="margin-bottom:12px">
+    <div class="actions" style="margin-bottom:12px" role="group" aria-label="Choose a side">
       <button class="btn btn--up" id="pick-up" aria-pressed="${selectedSide === "UP"}"
+              aria-label="Bet UP, paying ${fmtMultiplier(round.up_multiplier_x100)}"
               style="${selectedSide === "UP" ? "outline:2px solid var(--up);outline-offset:1px" : ""}">
-        <span class="btn__label">▲ UP</span>
-        <span class="btn__multiplier">${fmtMultiplier(round.up_multiplier_x100)}</span>
+        <span class="btn__label" aria-hidden="true">▲ UP</span>
+        <span class="btn__multiplier" aria-hidden="true">${fmtMultiplier(round.up_multiplier_x100)}</span>
       </button>
       <button class="btn btn--down" id="pick-down" aria-pressed="${selectedSide === "DOWN"}"
+              aria-label="Bet DOWN, paying ${fmtMultiplier(round.down_multiplier_x100)}"
               style="${selectedSide === "DOWN" ? "outline:2px solid var(--down);outline-offset:1px" : ""}">
-        <span class="btn__label">▼ DOWN</span>
-        <span class="btn__multiplier">${fmtMultiplier(round.down_multiplier_x100)}</span>
+        <span class="btn__label" aria-hidden="true">▼ DOWN</span>
+        <span class="btn__multiplier" aria-hidden="true">${fmtMultiplier(round.down_multiplier_x100)}</span>
       </button>
     </div>
 

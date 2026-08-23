@@ -23,7 +23,6 @@ const EXPLORER_URL = "https://explorer-studio.genlayer.com";
 // Public tickers used ONLY for the header display price (fast, no wallet/gas).
 // The price that actually executes a trade is fetched fresh on-chain by the
 // contract itself via GenLayer's Equivalence Principle — this is indicative only.
-const COINGECKO_IDS = { BTC: "bitcoin", ETH: "ethereum", SOL: "solana" };
 const TV_SYMBOLS = { BTC: "BINANCE:BTCUSDT", ETH: "BINANCE:ETHUSDT", SOL: "BINANCE:SOLUSDT" };
 
 const $ = (id) => document.getElementById(id);
@@ -219,14 +218,18 @@ function updateTradePreview() {
 }
 
 // ─── Ticker (indicative display price) ───────────────────────────────
+//
+// Binance rather than CoinGecko: CoinGecko's free endpoint drops its CORS headers
+// on a rate-limited response, so from a browser the failure surfaces as a wall of
+// CORS errors and the ticker silently stops updating. Binance answers reliably
+// cross-origin. The price that actually executes a trade is fetched on-chain by
+// the contract regardless — this is display only.
 async function fetchTickerPrice() {
-  const id = COINGECKO_IDS[selectedSymbol];
-  if (!id) return;
   try {
-    const r = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=usd`);
+    const r = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${selectedSymbol}USDT`);
     const d = await r.json();
-    const price = d?.[id]?.usd;
-    if (price) {
+    const price = parseFloat(d?.price);
+    if (isFinite(price) && price > 0) {
       const el = $("mark-price");
       if (el) { el.textContent = fmtUsd(price); el.dataset.raw = price; }
       updateTradePreview();
