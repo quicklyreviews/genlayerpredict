@@ -1,14 +1,18 @@
 {
   "name": "genlayer",
   "version": "1.0.0",
-  "description": "A mini prediction game built on **GenLayer** — the AI-powered blockchain.",
+  "description": "GenPerp — a multi-asset leveraged perpetual exchange built on **GenLayer** — the AI-powered blockchain.",
   "main": "index.js",
   "directories": {
     "test": "tests"
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "node scripts/build.js"
+    "build": "node scripts/build.js",
+    "deploy": "tsx deploy/deployPerpScript.ts",
+    "fund-vault": "tsx scripts/fund-vault.ts",
+    "keeper": "tsx scripts/perp-keeper.ts",
+    "backend": "node scripts/backend-proxy.js"
   },
   "keywords": [],
   "author": "",

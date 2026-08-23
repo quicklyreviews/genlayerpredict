@@ -1,255 +1,202 @@
 <!DOCTYPE html>
-
 <html lang="en"><head>
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-<title>Gen Predict - BTC Prediction Terminal</title>
-<!-- Tailwind CSS v3 CDN -->
+<title>GenPerp — Leveraged Perpetuals on GenLayer</title>
 <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
-<!-- Google Fonts: Inter -->
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
-<style data-purpose="base-typography">
-    body {
-      font-family: 'Inter', sans-serif;
-      background-color: #000000;
-      color: #ffffff;
-      -webkit-font-smoothing: antialiased;
-    }
-  </style>
-<style data-purpose="custom-components">
-    /* Clipped Corner Button - Connect Wallet */
-    .btn-connect {
-      position: relative;
-      background: transparent;
-      border: 1px solid #ffffff;
-      padding: 8px 20px;
-      clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
-      transition: all 0.3s ease;
-    }
-    .btn-connect:hover {
-      background: rgba(255, 255, 255, 0.1);
-    }
-
-    /* Prediction Buttons Styling */
-    .btn-predict-up {
-      position: relative;
-      background-color: #ffffff;
-      color: #000000;
-      font-weight: 700;
-      clip-path: polygon(15px 0, 100% 0, 100% calc(100% - 15px), calc(100% - 15px) 100%, 0 100%, 0 15px);
-      transition: transform 0.2s;
-    }
-    .btn-predict-up:hover {
-      transform: scale(1.02);
-    }
-    .btn-predict-up:disabled,
-    .btn-predict-down:disabled {
-      opacity: 0.35;
-      cursor: not-allowed;
-      transform: none;
-    }
-
-    .btn-predict-down {
-      position: relative;
-      background-color: transparent;
-      color: #ffffff;
-      border: 1px solid #ffffff;
-      font-weight: 700;
-      clip-path: polygon(15px 0, 100% 0, 100% calc(100% - 15px), calc(100% - 15px) 100%, 0 100%, 0 15px);
-      transition: transform 0.2s;
-    }
-    .btn-predict-down:hover {
-      background: rgba(255, 255, 255, 0.05);
-      transform: scale(1.02);
-    }
-
-    /* Scrollbar styling for a dark theme */
-    ::-webkit-scrollbar {
-      width: 6px;
-      height: 6px;
-    }
-    ::-webkit-scrollbar-track {
-      background: #000000;
-    }
-    ::-webkit-scrollbar-thumb {
-      background: #333;
-      border-radius: 10px;
-    }
-
-    /* Panel Borders */
-    .panel-border {
-      border: 1px solid #333;
-    }
-  </style>
-<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/></head>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet"/>
+<style>
+  body { font-family: 'Inter', sans-serif; background-color: #000; color: #fff; -webkit-font-smoothing: antialiased; }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+  .btn-connect { position: relative; background: transparent; border: 1px solid #fff; padding: 8px 20px; clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px)); transition: all .2s; }
+  .btn-connect:hover { background: rgba(255,255,255,.1); }
+  .panel-border { border: 1px solid #262626; }
+  .btn-long { background:#0d3321; color:#4ade80; border:1px solid rgba(74,222,128,.35); font-weight:700; transition: all .15s; }
+  .btn-long:hover { background:#124329; box-shadow:0 0 24px rgba(74,222,128,.25); }
+  .btn-long:disabled { opacity:.35; cursor:not-allowed; box-shadow:none; }
+  .btn-short { background:#3a1418; color:#f87171; border:1px solid rgba(248,113,113,.35); font-weight:700; transition: all .15s; }
+  .btn-short:hover { background:#4a1a1f; box-shadow:0 0 24px rgba(248,113,113,.25); }
+  .btn-short:disabled { opacity:.35; cursor:not-allowed; box-shadow:none; }
+  .tab-market { padding:8px 16px; border-radius:8px; font-size:13px; font-weight:600; color:#8a8a8a; cursor:pointer; border:1px solid transparent; white-space:nowrap; }
+  .tab-market.active { background:#151515; color:#fff; border-color:#333; }
+  .tab-market:hover:not(.active) { color:#ddd; }
+  ::-webkit-scrollbar { width:6px; height:6px; }
+  ::-webkit-scrollbar-track { background:#000; }
+  ::-webkit-scrollbar-thumb { background:#333; border-radius:10px; }
+  input[type=range] { -webkit-appearance:none; height:4px; border-radius:2px; background:#262626; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:16px; height:16px; border-radius:50%; background:#fff; cursor:pointer; margin-top:-6px; }
+  .hidden { display:none !important; }
+  .pill { font-size:10px; text-transform:uppercase; letter-spacing:.5px; padding:2px 8px; border-radius:999px; font-weight:700; }
+</style>
+</head>
 <body class="min-h-screen p-4">
-<!-- BEGIN: MainHeader -->
-<header class="max-w-7xl mx-auto flex items-center justify-between mb-8 px-2" data-purpose="site-navigation">
-<div class="flex items-center gap-2">
-<!-- GenLayer Logo -->
-<div class="flex items-center gap-2" data-purpose="logo-container">
-<img class="w-8 h-8" src="https://assets.zksync.io/images/genlayer_white.svg" alt="Gen Predict" />
-<span class="text-2xl font-bold tracking-tight">Gen Predict</span>
-</div>
-</div>
-<nav class="hidden md:flex items-center gap-16 text-sm font-medium text-gray-400">
-<a class="hover:text-white transition-colors" href="#">Market</a>
-<a class="hover:text-white transition-colors" href="#">Governance</a>
-<a class="hover:text-white transition-colors" href="#">Stats</a>
-</nav>
-<div data-purpose="header-actions" class="flex items-center gap-3">
-  <span id="wallet-balance" class="text-xs font-mono text-green-400 hidden">0 GEN</span>
-  <span id="connection-label" class="text-xs text-gray-400 hidden">Disconnected</span>
-  <button id="btn-fund" class="btn-connect text-sm text-yellow-400 border-yellow-400" onclick="fundContract()">
-    Fund
-  </button>
-  <button id="btn-connect" class="btn-connect text-sm" onclick="connectWallet()">
-    Connect Wallet
-  </button>
-</div>
+
+<header class="max-w-7xl mx-auto flex items-center justify-between mb-6 px-2">
+  <div class="flex items-center gap-2">
+    <img class="w-8 h-8" src="https://assets.zksync.io/images/genlayer_white.svg" alt="GenPerp"/>
+    <span class="text-2xl font-bold tracking-tight">GenPerp</span>
+    <span class="pill bg-purple-900/40 text-purple-300 border border-purple-700/40 ml-1">Intelligent Contracts</span>
+  </div>
+  <div class="flex items-center gap-3">
+    <span id="wallet-balance" class="text-xs mono text-green-400 hidden">0 GEN</span>
+    <span id="connection-label" class="text-xs text-gray-400 hidden">Disconnected</span>
+    <button id="btn-fund" class="btn-connect text-sm text-yellow-400 border-yellow-400" onclick="fundVault()">Fund Vault</button>
+    <button id="btn-connect" class="btn-connect text-sm" onclick="connectWallet()">Connect Wallet</button>
+    <button class="text-gray-500 hover:text-white text-sm" onclick="openConfig()">⚙</button>
+  </div>
 </header>
-<!-- END: MainHeader -->
-<!-- BEGIN: MainContent -->
+
+<!-- Market tabs -->
+<div class="max-w-7xl mx-auto flex items-center gap-2 overflow-x-auto pb-3 px-2" id="market-tabs"></div>
+
 <main class="max-w-7xl mx-auto">
 <div class="grid grid-cols-1 lg:grid-cols-12 gap-4">
-<!-- BEGIN: RoundSelector -->
-<div class="lg:col-span-12 flex items-center gap-2 overflow-x-auto pb-2" id="round-selector">
-  <span class="text-xs text-gray-500 mr-2 whitespace-nowrap">Rounds:</span>
-</div>
-<!-- END: RoundSelector -->
-<!-- BEGIN: ChartContainer -->
-<section class="lg:col-span-8 panel-border bg-[#0a0a0a] flex flex-col min-h-[300px] lg:min-h-[500px]" data-purpose="trading-view-live">
-<!-- Chart Toolbar -->
-<div class="flex items-center justify-between border-b border-[#2a2a2a] p-2 text-xs text-gray-400">
-<div class="flex items-center gap-4">
-<span class="flex items-center gap-1 font-bold text-gray-200">
-<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
-              BTC/USDT · TradingView
-            </span>
-<span id="chart-phase-badge" class="px-2 py-0.5 rounded text-[10px] bg-gray-800 text-gray-300">IDLE</span>
-</div>
-<div class="flex items-center gap-3">
-<span id="current-btc-price" class="font-mono text-gray-200">—</span>
-</div>
-</div>
-<div class="flex flex-1 relative overflow-hidden">
-<!-- TradingView Widget -->
-<div class="flex-1 relative">
-  <iframe id="tradingview-chart" class="w-full h-full border-0" src="about:blank"></iframe>
-</div>
-</div>
-<!-- Chart Bottom Controls -->
-<div class="flex items-center justify-between border-t border-[#2a2a2a] p-2 text-[10px] text-gray-500">
-<div class="flex gap-3">
-<span class="text-gray-400">5 min rounds · Auto-managed</span>
-</div>
-<div class="flex gap-4">
-<span class="hover:text-white cursor-pointer uppercase">log</span>
-<span class="hover:text-white cursor-pointer uppercase">auto</span>
-</div>
-</div>
-</section>
-<!-- END: ChartContainer -->
 
-<!-- BEGIN: PredictionInterface -->
-<section class="lg:col-span-4 panel-border bg-[#0a0a0a] p-6 flex flex-col" data-purpose="user-actions">
-<h2 class="text-gray-400 text-sm mb-8 border-b border-[#2a2a2a] pb-2">Prediction Interface</h2>
-<div class="text-center mb-8">
-  <span id="phase-label" class="text-xs text-gray-500 uppercase tracking-widest block mb-2">Waiting for round...</span>
-  <div id="timer-text" class="text-3xl md:text-4xl font-bold font-mono tracking-tight leading-snug">—</div>
-  <div id="timer-sub" class="text-xs text-gray-500 mt-1 min-h-[16px]"></div>
-  <div class="h-1 bg-white/10 rounded-full mt-3 mx-auto w-full overflow-hidden"><div id="timer-fill" class="h-full transition-all duration-1000" style="width:0%;background:#fff"></div></div>
+  <!-- Chart -->
+  <section class="lg:col-span-8 panel-border bg-[#0a0a0a] flex flex-col min-h-[320px] lg:min-h-[480px]">
+    <div class="flex items-center justify-between border-b border-[#2a2a2a] p-2 text-xs text-gray-400">
+      <div class="flex items-center gap-4">
+        <span id="chart-title" class="flex items-center gap-1 font-bold text-gray-200">BTC/USDT</span>
+        <span id="vault-badge" class="px-2 py-0.5 rounded text-[10px] bg-gray-800 text-gray-300">Vault —</span>
+      </div>
+      <div class="flex items-center gap-3">
+        <span id="mark-price" class="mono text-gray-200">—</span>
+      </div>
+    </div>
+    <div class="flex flex-1 relative overflow-hidden">
+      <div class="flex-1 relative"><iframe id="tradingview-chart" class="w-full h-full border-0" src="about:blank"></iframe></div>
+    </div>
+    <div class="flex items-center justify-between border-t border-[#2a2a2a] p-2 text-[10px] text-gray-500">
+      <span>No oracle — price fetched on-chain via GenLayer's Equivalence Principle (Binance → CoinGecko → Coinbase, 0.5% consensus band)</span>
+      <span id="funding-badge" class="mono">funding —</span>
+    </div>
+  </section>
+
+  <!-- Trade panel -->
+  <section class="lg:col-span-4 panel-border bg-[#0a0a0a] p-6 flex flex-col">
+    <h2 class="text-gray-400 text-sm mb-5 border-b border-[#2a2a2a] pb-2">Open Position</h2>
+
+    <div class="space-y-5">
+      <div>
+        <label class="block text-xs text-gray-500 mb-1">Margin (GEN)</label>
+        <div class="flex items-center border border-[#333] bg-[#121212] rounded overflow-hidden">
+          <input id="margin-amount" class="bg-transparent border-none focus:ring-0 text-sm flex-1 px-4 py-3" type="number" min="0.001" step="0.01" value="1"/>
+          <button class="px-4 py-3 border-l border-[#333] hover:bg-[#1a1a1a]" onclick="document.getElementById('margin-amount').stepUp()">+</button>
+          <button class="px-4 py-3 border-l border-[#333] hover:bg-[#1a1a1a]" onclick="document.getElementById('margin-amount').stepDown()">-</button>
+        </div>
+        <p id="min-margin-hint" class="text-[11px] text-gray-600 mt-1"></p>
+      </div>
+
+      <div>
+        <div class="flex justify-between text-xs text-gray-500 mb-1">
+          <span>Leverage</span>
+          <span id="leverage-value" class="text-white font-semibold mono">5x</span>
+        </div>
+        <input id="leverage-slider" type="range" min="1" max="20" value="5" class="w-full" oninput="onLeverageChange()"/>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3 pt-1">
+        <button id="btn-long" class="btn-long w-full py-4 text-sm uppercase tracking-widest rounded" onclick="openPosition('LONG')">Long ▲</button>
+        <button id="btn-short" class="btn-short w-full py-4 text-sm uppercase tracking-widest rounded" onclick="openPosition('SHORT')">Short ▼</button>
+      </div>
+      <p id="trade-feedback" class="text-xs text-center text-gray-400 min-h-[16px]"></p>
+
+      <div class="pt-3 border-t border-[#1a1a1a] space-y-2 text-sm">
+        <div class="flex justify-between"><span class="text-gray-500">Notional</span><span id="preview-notional" class="text-white mono">—</span></div>
+        <div class="flex justify-between"><span class="text-gray-500">Fee</span><span id="preview-fee" class="text-white mono">—</span></div>
+        <div class="flex justify-between"><span class="text-gray-500">Est. liq. price</span><span id="preview-liq" class="text-white mono">—</span></div>
+        <div class="flex justify-between"><span class="text-gray-500">Max leverage</span><span id="preview-maxlev" class="text-white mono">—</span></div>
+      </div>
+    </div>
+  </section>
 </div>
-<div class="space-y-6">
-<div data-purpose="input-group">
-  <label class="block text-xs text-gray-500 mb-1">Wager Amount (GEN)</label>
-  <div class="flex items-center border border-[#333] bg-[#121212] rounded overflow-hidden">
-    <input id="bet-amount" class="bg-transparent border-none focus:ring-0 text-sm flex-1 px-4 py-3" type="number" min="0.01" step="0.01" value="1"/>
-    <button class="px-4 py-3 border-l border-[#333] hover:bg-[#1a1a1a] transition-colors" onclick="document.getElementById('bet-amount').stepUp()">+</button>
-    <button class="px-4 py-3 border-l border-[#333] hover:bg-[#1a1a1a] transition-colors" onclick="document.getElementById('bet-amount').stepDown()">-</button>
+
+<!-- Vault status -->
+<section class="mt-4 grid grid-cols-2 md:grid-cols-4 gap-3">
+  <div class="panel-border bg-[#0a0a0a] p-4 text-center">
+    <div class="text-[11px] text-gray-500 uppercase tracking-wide">Vault Balance</div>
+    <div id="vault-balance" class="text-lg font-bold mono mt-1">—</div>
   </div>
-</div>
-<div class="space-y-3 pt-4">
-  <button id="btn-up" class="btn-predict-up w-full py-4 text-sm uppercase tracking-widest" onclick="placeBet('UP')">
-    Predict Up ↑
-  </button>
-  <button id="btn-down" class="btn-predict-down w-full py-4 text-sm uppercase tracking-widest" onclick="placeBet('DOWN')">
-    Predict Down ↓
-  </button>
-  <p id="vote-feedback" class="text-xs text-center text-gray-400"></p>
-</div>
-<div class="pt-4 space-y-4">
-<div class="text-center text-sm">
-<span class="text-gray-400">Profit Multiplier:</span>
-<span class="text-white font-semibold">1.95x</span>
-</div>
-<div class="pt-4 border-t border-[#1a1a1a] space-y-3">
-  <div class="flex justify-between text-sm">
-    <span class="text-gray-500">Round</span>
-    <span class="text-white font-semibold"><span id="round-id">#0</span> · <span id="round-status-badge" class="text-gray-300">IDLE</span></span>
+  <div class="panel-border bg-[#0a0a0a] p-4 text-center">
+    <div class="text-[11px] text-gray-500 uppercase tracking-wide">Free Balance</div>
+    <div id="vault-free" class="text-lg font-bold mono mt-1">—</div>
   </div>
-  <div class="flex justify-between text-sm">
-    <span class="text-gray-500">Open/Close</span>
-    <span class="text-white font-semibold"><span id="open-price">$—</span> <span id="price-arrow" class="text-gray-500">→</span> <span id="close-price">$—</span></span>
+  <div class="panel-border bg-[#0a0a0a] p-4 text-center">
+    <div class="text-[11px] text-gray-500 uppercase tracking-wide">Open Interest (L/S)</div>
+    <div id="vault-oi" class="text-lg font-bold mono mt-1">—</div>
   </div>
-  <div class="flex justify-between text-sm">
-    <span class="text-gray-500">Votes (UP/DOWN)</span>
-    <span class="text-white font-semibold"><span id="up-count">0</span>/<span id="down-count">0</span></span>
+  <div class="panel-border bg-[#0a0a0a] p-4 text-center">
+    <div class="text-[11px] text-gray-500 uppercase tracking-wide">Total Positions</div>
+    <div id="vault-positions" class="text-lg font-bold mono mt-1">—</div>
   </div>
-  <div class="flex justify-between text-sm">
-    <span class="text-gray-500">Pools</span>
-    <span class="text-white font-semibold"><span id="pool-up">0 GEN</span> · <span id="pool-down">0 GEN</span></span>
-  </div>
-  <div id="winner-banner" class="hidden text-center text-sm pt-2">
-    <span id="winner-icon">🏆</span>
-    <span id="winner-text" class="ml-1">—</span>
-  </div>
-  <!-- Participants -->
-  <div id="participants-panel" class="pt-3 border-t border-[#1a1a1a] hidden">
-    <span class="text-xs text-gray-500 block mb-2">Participants</span>
-    <div id="participants-list" class="text-xs text-gray-400 space-y-1 max-h-32 overflow-y-auto"></div>
-  </div>
-</div>
-</div>
-</div>
 </section>
-<!-- END: PredictionInterface -->
-</div>
-<!-- BEGIN: LiveFeedSection -->
-<section class="mt-4 bg-[#0a0a0a] overflow-hidden" data-purpose="user-history">
-<div class="p-4 border-b border-[#2a2a2a] flex items-center justify-between">
-<h3 class="text-sm font-medium text-gray-200">Your Bet History</h3>
-<span id="history-stats" class="text-xs text-gray-500"></span>
-</div>
-<div class="overflow-x-auto">
-<table class="w-full text-left text-xs text-gray-400">
-<thead>
-<tr class="border-b border-[#1a1a1a] text-gray-500 uppercase tracking-tighter">
-<th class="px-4 py-3 font-normal">Round</th>
-<th class="px-4 py-3 font-normal text-center">Your Bet</th>
-<th class="px-4 py-3 font-normal text-center">Amount</th>
-<th class="px-4 py-3 font-normal text-center">Entry</th>
-<th class="px-4 py-3 font-normal text-center">Lock → Close</th>
-<th class="px-4 py-3 font-normal text-center">Winner</th>
-<th class="px-4 py-3 font-normal text-center">Status</th>
-<th class="px-4 py-3 font-normal text-right">Action</th>
-</tr>
-</thead>
-<tbody id="history-body" class="divide-y divide-[#1a1a1a]">
-<tr><td colspan="8" class="px-4 py-8 text-center text-gray-600">Connect wallet to see your history</td></tr>
-</tbody>
-</table>
-</div>
+
+<!-- Positions table -->
+<section class="mt-4 bg-[#0a0a0a] overflow-hidden panel-border">
+  <div class="p-4 border-b border-[#2a2a2a] flex items-center justify-between">
+    <h3 class="text-sm font-medium text-gray-200">Your Positions</h3>
+    <span id="positions-stats" class="text-xs text-gray-500"></span>
+  </div>
+  <div class="overflow-x-auto">
+    <table class="w-full text-left text-xs text-gray-400">
+      <thead>
+        <tr class="border-b border-[#1a1a1a] text-gray-500 uppercase tracking-tighter">
+          <th class="px-4 py-3 font-normal">ID</th>
+          <th class="px-4 py-3 font-normal">Market</th>
+          <th class="px-4 py-3 font-normal text-center">Side</th>
+          <th class="px-4 py-3 font-normal text-center">Lev</th>
+          <th class="px-4 py-3 font-normal text-center">Margin</th>
+          <th class="px-4 py-3 font-normal text-center">Entry</th>
+          <th class="px-4 py-3 font-normal text-center">Liq. Est.</th>
+          <th class="px-4 py-3 font-normal text-center">PnL / ROI</th>
+          <th class="px-4 py-3 font-normal text-center">Status</th>
+          <th class="px-4 py-3 font-normal text-right">Action</th>
+        </tr>
+      </thead>
+      <tbody id="positions-body" class="divide-y divide-[#1a1a1a]">
+        <tr><td colspan="10" class="px-4 py-8 text-center text-gray-600">Connect wallet to see your positions</td></tr>
+      </tbody>
+    </table>
+  </div>
 </section>
-<!-- END: LiveFeedSection -->
+
+<!-- Activity log -->
+<section class="mt-4 panel-border bg-[#0a0a0a] p-4">
+  <h3 class="text-sm font-medium text-gray-200 mb-2">Activity</h3>
+  <div id="activity-log" class="max-h-40 overflow-y-auto text-xs mono text-gray-500 space-y-1">
+    <div class="log-empty text-center text-gray-700 py-4">No activity yet</div>
+  </div>
+</section>
+
 </main>
-<!-- END: MainContent -->
 
-<!-- BEGIN: Footer -->
 <footer class="max-w-7xl mx-auto mt-8 py-6 border-t border-[#1a1a1a] text-center text-xs text-gray-500">
-  Created by <a href="https://x.com/trungkts29" target="_blank" rel="noopener noreferrer" class="text-gray-300 hover:text-white transition-colors font-medium">@trungkts29</a>
+  GenPerp — a multi-asset leveraged perpetual exchange built on <a href="https://www.genlayer.com" target="_blank" class="text-gray-300 hover:text-white">GenLayer</a> Intelligent Contracts.
+  Created by <a href="https://x.com/trungkts29" target="_blank" rel="noopener noreferrer" class="text-gray-300 hover:text-white font-medium">@trungkts29</a>
 </footer>
-<!-- END: Footer -->
+
+<!-- Config modal -->
+<div id="config-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center">
+  <div class="absolute inset-0 bg-black/70" onclick="closeConfig()"></div>
+  <div class="relative bg-[#0a0a0a] panel-border rounded p-6 w-[90%] max-w-md">
+    <h2 class="text-lg font-bold mb-4">Configuration</h2>
+    <div class="space-y-3">
+      <div>
+        <label class="block text-xs text-gray-500 mb-1 uppercase">Backend URL</label>
+        <input id="input-rpc" class="w-full bg-[#121212] border border-[#333] rounded px-3 py-2 text-sm mono"/>
+      </div>
+      <div>
+        <label class="block text-xs text-gray-500 mb-1 uppercase">Contract Address</label>
+        <input id="input-contract" class="w-full bg-[#121212] border border-[#333] rounded px-3 py-2 text-sm mono"/>
+      </div>
+    </div>
+    <div class="flex gap-2 justify-end mt-5">
+      <button class="btn-connect text-sm" onclick="closeConfig()">Cancel</button>
+      <button class="btn-connect text-sm border-green-500 text-green-400" onclick="saveConfig()">Save & Reconnect</button>
+    </div>
+  </div>
+</div>
+
 <script type="importmap">
 {
   "imports": {
@@ -259,5 +206,5 @@
   }
 }
 </script>
-<script type="module" src="app.js?v=31"></script>
+<script type="module" src="app.js?v=1"></script>
 </body></html>

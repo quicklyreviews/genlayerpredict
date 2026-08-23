@@ -1,8 +1,10 @@
 /**
- * BTC Up/Down Market — Frontend Application
+ * GenPerp — Frontend Application
  *
- * Users connect their own wallet (MetaMask / GenLayer Wallet).
- * Reads go through backend proxy. Writes are signed by user's wallet.
+ * Trading (open_position / close_position / fund_vault) is always signed
+ * directly by the user's own wallet via genlayer-js — never routed through
+ * the backend. The backend is a read-only proxy + keeper (price refresh,
+ * liquidations, funding), see scripts/backend-proxy.js.
  */
 import { createClient } from 'genlayer-js';
 import { studionet } from 'genlayer-js/chains';
@@ -11,48 +13,48 @@ import { TransactionStatus } from 'genlayer-js/types';
 // ─── Configuration ──────────────────────────────────────────────────
 let CONFIG = {
   backendUrl: "http://localhost:3005",
-  contractAddress: "0x6a50708F562E635FD1319fFeB723b9D6568CE3A2",
+  contractAddress: "",
 };
 
 const STUDIO_CHAIN_ID = "0xF22F"; // 61999
 const STUDIO_RPC = "https://studio.genlayer.com/api";
 const EXPLORER_URL = "https://explorer-studio.genlayer.com";
 
-// ─── Safe GEN → Wei conversion (avoids float precision bugs) ────────
+// Public tickers used ONLY for the header display price (fast, no wallet/gas).
+// The price that actually executes a trade is fetched fresh on-chain by the
+// contract itself via GenLayer's Equivalence Principle — this is indicative only.
+const COINGECKO_IDS = { BTC: "bitcoin", ETH: "ethereum", SOL: "solana" };
+const TV_SYMBOLS = { BTC: "BINANCE:BTCUSDT", ETH: "BINANCE:ETHUSDT", SOL: "BINANCE:SOLUSDT" };
+
+const $ = (id) => document.getElementById(id);
+
 function parseGenToWei(value) {
   const str = String(value).trim();
   const [whole, frac = ""] = str.split(".");
   const fracPadded = (frac + "0".repeat(18)).slice(0, 18);
   return BigInt(whole || "0") * (10n ** 18n) + BigInt(fracPadded);
 }
+function formatWeiToGen(value, decimals = 4) {
+  try {
+    const n = Number(BigInt(value)) / 1e18;
+    return n.toLocaleString(undefined, { maximumFractionDigits: decimals });
+  } catch { return "0"; }
+}
+function fmtUsd(v) {
+  const n = parseFloat(v);
+  if (!isFinite(n) || n === 0) return "$—";
+  return "$" + n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
 
-let pollInterval = null;
+// ─── State ──────────────────────────────────────────────────────────
 let userAccount = null;
-let selectedRoundId = null; // null = current round
-let localBet = null; // { roundId, direction, amount } — tracks pending bet before finalization
-let currentRoundId = 0;
-
-// Safe DOM helper
-const $ = (id) => document.getElementById(id);
-
-// ─── Formatters ───────────────────────────────────────────
-function formatWeiToGen(value) {
-  try { return (BigInt(value) / 10n ** 18n).toString(); }
-  catch { return "0"; }
-}
-
-function renderHistoryStatus(status) {
-  const map = {
-    PENDING: `<span class="text-yellow-400 animate-pulse">⏳ PENDING</span>`,
-    CLAIM:   `<span class="text-green-400 font-semibold">💰 CLAIM</span>`,
-    CLAIMED: `<span class="text-gray-500">✅ CLAIMED</span>`,
-    LOST:    `<span class="text-red-400">❌ LOST</span>`,
-  };
-  return map[status] || `<span class="text-gray-400">${status}</span>`;
-}
+let selectedSymbol = "BTC";
+let markets = {};      // symbol -> market config (from contract)
+let vaultStatus = {};
+let pollInterval = null;
+let tickerInterval = null;
 
 // ─── Backend API (reads only) ────────────────────────────────────────
-
 let _backendErrorCount = 0;
 let _backendPaused = false;
 
@@ -65,661 +67,337 @@ async function apiCall(endpoint, options = {}) {
     });
     const data = await res.json();
     if (data.error) throw new Error(data.error);
-    _backendErrorCount = 0; // reset on success
-    _backendPaused = false;
+    _backendErrorCount = 0; _backendPaused = false;
     return data;
   } catch (e) {
     _backendErrorCount++;
     if (_backendErrorCount >= 3) {
       _backendPaused = true;
-      setTimeout(() => { _backendPaused = false; _backendErrorCount = 0; }, 60000); // thử lại sau 1 phút
+      setTimeout(() => { _backendPaused = false; _backendErrorCount = 0; }, 60000);
       addLog("⚠️ Backend unreachable — pausing polls for 60s");
     }
     throw e;
   }
 }
-
 async function readContract(functionName, args = []) {
-  return apiCall("/api/call", {
-    method: "POST",
-    body: JSON.stringify({ method: functionName, args, type: "read" }),
-  });
+  return apiCall("/api/call", { method: "POST", body: JSON.stringify({ method: functionName, args, type: "read" }) });
 }
 
-// ─── GenLayer Client ─────────────────────────────────────────────────
-
-let _glClient = null;
-let _glClientAccount = null;
-let _glClientProvider = null;
-
+// ─── GenLayer Client (wallet-signed writes) ─────────────────────────
+let _glClient = null, _glClientAccount = null, _glClientProvider = null;
 function getGenLayerClient() {
-  // genlayer-js's transport only auto-resolves window.ethereum. If the user is on
-  // OKX Wallet (or any wallet not injected as window.ethereum), routing falls
-  // through to the GenLayer RPC which has no eth_sendTransaction → error.
-  // Pass the actual provider explicitly so wallet signing goes to MetaMask/OKX.
   const provider = getProvider();
   if (!_glClient || _glClientAccount !== userAccount || _glClientProvider !== provider) {
-    _glClient = createClient({
-      chain: studionet,
-      account: userAccount,
-      provider: provider,
-    });
-    _glClientAccount = userAccount;
-    _glClientProvider = provider;
+    _glClient = createClient({ chain: studionet, account: userAccount, provider });
+    _glClientAccount = userAccount; _glClientProvider = provider;
   }
   return _glClient;
 }
 
-// ─── Wallet Write ────────────────────────────────────────────────────
-
 async function writeContract(functionName, args = [], valueWei = "0x0") {
   if (!getProvider()) throw new Error("No wallet detected");
   if (!userAccount) throw new Error("Wallet not connected");
-
-  await ensureStudioChain(); // Switch network manually instead of using client.connect() which requires Snaps
-
+  await ensureStudioChain();
   const client = getGenLayerClient();
-
   const valueBigInt = typeof valueWei === "string" ? BigInt(valueWei) : BigInt(valueWei);
-
-  const txHash = await client.writeContract({
-    address: CONFIG.contractAddress,
-    functionName: functionName,
-    args: args,
-    value: valueBigInt,
-  });
-
+  const txHash = await client.writeContract({ address: CONFIG.contractAddress, functionName, args, value: valueBigInt });
   addLog(`TX sent: ${functionName}() → ${txHash.slice(0, 14)}...`);
   return txHash;
 }
 
-// ─── Chain Management ────────────────────────────────────────────────
-
 async function ensureStudioChain() {
   const currentChainId = await getProvider().request({ method: "eth_chainId" });
   if (currentChainId === STUDIO_CHAIN_ID) return;
-
   try {
-    await getProvider().request({
-      method: "wallet_switchEthereumChain",
-      params: [{ chainId: STUDIO_CHAIN_ID }],
-    });
+    await getProvider().request({ method: "wallet_switchEthereumChain", params: [{ chainId: STUDIO_CHAIN_ID }] });
   } catch (switchError) {
     if (switchError.code === 4902) {
       await getProvider().request({
         method: "wallet_addEthereumChain",
-        params: [{
-          chainId: STUDIO_CHAIN_ID,
-          chainName: "GenLayer Studio",
-          rpcUrls: [STUDIO_RPC],
-          nativeCurrency: { name: "GEN", symbol: "GEN", decimals: 18 },
-          blockExplorerUrls: ["https://explorer-studio.genlayer.com"],
-        }],
+        params: [{ chainId: STUDIO_CHAIN_ID, chainName: "GenLayer Studio", rpcUrls: [STUDIO_RPC],
+          nativeCurrency: { name: "GEN", symbol: "GEN", decimals: 18 }, blockExplorerUrls: [EXPLORER_URL] }],
       });
-    } else {
-      throw switchError;
-    }
+    } else throw switchError;
   }
 }
 
-// ─── UI Updaters ────────────────────────────────────────────────────
-
-// Cache latest round data for 1-second timer ticks
-let _lastRoundData = null;
-
-function updateRoundUI(data) {
-  if (!data) return;
-  _lastRoundData = data; // cache for timer ticks
-
-  const roundId = Number(data.round_id || 0);
-  const status = data.status || "IDLE";
-  const startPrice = Number(data.start_price || 0);
-  const endPrice = Number(data.end_price || 0);
-  const upCount = Number(data.up_count || 0);
-  const downCount = Number(data.down_count || 0);
-  const winner = data.winner || "NONE";
-  const roundStart = Number(data.round_start_time || 0);
-  const bettingSec = Number(data.betting_seconds || 300);
-  const lockSec = Number(data.lock_seconds || 300);
-  const upPool = data.up_pool || "0";
-  const downPool = data.down_pool || "0";
-  const totalRounds = Number(data.total_rounds || 0);
-
-  // Sync chart phase badge with contract status
-  const chartBadge = $("chart-phase-badge");
-  if (chartBadge) {
-    chartBadge.textContent = status;
-    const badgeColors = { OPEN: "bg-green-800 text-green-300", LOCKED: "bg-yellow-800 text-yellow-300", RESOLVED: "bg-blue-800 text-blue-300", IDLE: "bg-gray-800 text-gray-300" };
-    chartBadge.className = `px-2 py-0.5 rounded text-[10px] ${badgeColors[status] || badgeColors.IDLE}`;
-  }
-
-  // Round ID
-  const rid = $("round-id"); if (rid) rid.textContent = `#${roundId || 0}`;
-
-  // Status badge
-  const badge = $("round-status-badge");
-  if (badge) {
-    badge.textContent = status;
-    const colors = { OPEN: "#4ade80", LOCKED: "#facc15", RESOLVED: "#60a5fa", IDLE: "#9ca3af" };
-    badge.style.color = colors[status] || "#9ca3af";
-  }
-
-  // Prices — span already in HTML, just set text (no $ prefix in JS)
-  const op = $("open-price"); if (op) op.textContent = startPrice > 0 ? `$${startPrice.toLocaleString()}` : "$—";
-  const cp = $("close-price"); if (cp) cp.textContent = endPrice > 0 ? `$${endPrice.toLocaleString()}` : "$—";
-
-  // Arrow
-  const arrow = $("price-arrow");
-  if (arrow) {
-    if (status === "RESOLVED") {
-      if (endPrice > startPrice) { arrow.textContent = "▲"; arrow.style.color = "#4ade80"; }
-      else if (endPrice < startPrice) { arrow.textContent = "▼"; arrow.style.color = "#f87171"; }
-      else { arrow.textContent = "="; arrow.style.color = "#9ca3af"; }
-    } else { arrow.textContent = "→"; arrow.style.color = "#9ca3af"; }
-  }
-
-  // Vote counts
-  const uc = $("up-count"); if (uc) uc.textContent = upCount;
-  const dc = $("down-count"); if (dc) dc.textContent = downCount;
-
-  // Pools
-  try {
-    const upPoolGen = (BigInt(upPool) / BigInt(1e18)).toString();
-    const downPoolGen = (BigInt(downPool) / BigInt(1e18)).toString();
-    const pu = $("pool-up"); if (pu) pu.textContent = upPoolGen + " GEN";
-    const pd = $("pool-down"); if (pd) pd.textContent = downPoolGen + " GEN";
-  } catch(e) {}
-
-  // Timer
-  updateTimer(status, roundStart, bettingSec, lockSec, roundId);
-
-  // Round selector
-  renderRoundSelector(totalRounds, roundId);
-
-  // Winner banner
-  const banner = $("winner-banner");
-  const winnerText = $("winner-text");
-  const winnerIcon = $("winner-icon");
-  if (banner && winnerText && winnerIcon) {
-    if (status === "RESOLVED") {
-      banner.classList.remove("hidden");
-      if (winner === "UP") { winnerIcon.textContent = "🟢"; winnerText.textContent = "UP Wins! Price went up."; }
-      else if (winner === "DOWN") { winnerIcon.textContent = "🔴"; winnerText.textContent = "DOWN Wins! Price went down."; }
-      else { winnerIcon.textContent = "⚪"; winnerText.textContent = "DRAW — Price unchanged."; }
-    } else { banner.classList.add("hidden"); }
-  }
-
-  // Disable/enable bet controls
-  const now = Math.floor(Date.now() / 1000);
-  const remaining = Math.max(0, roundStart + bettingSec - now);
-  
-  let hasOptimistic = false;
-  try {
-    const optStr = localStorage.getItem("optimistic_bet");
-    if (optStr) {
-      const opt = JSON.parse(optStr);
-      if (Number(opt.roundId) === Number(roundId) && Date.now() - opt.timestamp < 300000) {
-        hasOptimistic = true;
-      }
-    }
-  } catch(e) {}
-
-  const hasLocalBet = (localBet && localBet.roundId === roundId) || hasOptimistic;
-  const canBet = status === "OPEN" && remaining > 0 && !hasLocalBet;
-  const bu = $("btn-up"); if (bu) bu.disabled = !canBet;
-  const bd = $("btn-down"); if (bd) bd.disabled = !canBet;
-  const ba = $("bet-amount"); if (ba) ba.disabled = !canBet;
-
-  // Reset localBet if round changed
-  if (roundId !== currentRoundId) {
-    currentRoundId = roundId;
-    localBet = null;
-  }
+function getProvider() {
+  if (window.ethereum) return window.ethereum;
+  if (window.okxwallet) return window.okxwallet;
+  return null;
 }
 
-function updateTimer(status, roundStart, bettingSec, lockSec, roundId) {
-  const fill  = $("timer-fill");
-  const text  = $("timer-text");
-  const sub   = $("timer-sub");
-  const label = $("phase-label");
-  if (!text) return;
-  const now = Math.floor(Date.now() / 1000);
-  const bettingEnd = roundStart + bettingSec;
-  const lockEnd    = roundStart + bettingSec + lockSec;
-  const rid = roundId || 0;
-
-  if (status === "OPEN") {
-    const elapsed   = now - roundStart;
-    const remaining = Math.max(0, bettingEnd - now);
-    if (remaining > 0) {
-      const pct = Math.min(100, (elapsed / bettingSec) * 100);
-      if (fill)  { fill.style.width = pct + "%"; fill.style.background = "#4ade80"; }
-      if (label) { label.textContent = `Round #${rid} · Betting Open`; label.style.color = "#4ade80"; }
-      text.textContent = formatTime(remaining);
-      if (sub) sub.textContent = "Place your UP/DOWN prediction";
-    } else {
-      if (fill)  { fill.style.width = "100%"; fill.style.background = "#f59e0b"; }
-      if (label) { label.textContent = `Round #${rid} · Waiting lock...`; label.style.color = "#f59e0b"; }
-      text.textContent = "Waiting lock...";
-      if (sub) sub.textContent = "On-chain status is still OPEN. Backend must lock this round.";
-    }
-  } else if (status === "LOCKED") {
-    const elapsed   = now - bettingEnd;
-    const remaining = Math.max(0, lockEnd - now);
-    if (remaining > 0) {
-      const pct = Math.min(100, (elapsed / lockSec) * 100);
-      if (fill)  { fill.style.width = pct + "%"; fill.style.background = "#facc15"; }
-      if (label) { label.textContent = `Round #${rid} · Locked`; label.style.color = "#facc15"; }
-      text.textContent = formatTime(remaining);
-      if (sub) sub.textContent = "BTC price moving — oracle resolves after timer";
-    } else {
-      if (fill)  { fill.style.width = "100%"; fill.style.background = "#f59e0b"; }
-      if (label) { label.textContent = `Round #${rid} · Resolving...`; label.style.color = "#f59e0b"; }
-      text.textContent = "Resolving...";
-      if (sub) sub.textContent = "⏳ GenLayer validators fetching final BTC price";
-    }
-  } else if (status === "RESOLVED") {
-    if (fill)  { fill.style.width = "100%"; fill.style.background = "#4ade80"; }
-    if (label) { label.textContent = `Round #${rid} · Resolved`; label.style.color = "#4ade80"; }
-    text.textContent = "Resolved";
-    if (sub) sub.textContent = roundStart === 0 ? "✅ Round finished" : "✅ Next round starting soon";
-  } else {
-    if (fill)  { fill.style.width = "0%"; fill.style.background = "#fff"; }
-    if (label) { label.textContent = "Waiting for round..."; label.style.color = "#9ca3af"; }
-    text.textContent = "—";
-    if (sub) sub.textContent = "Round will start automatically";
-  }
-}
-
-function formatTime(sec) {
-  const m = Math.floor(sec / 60);
-  const s = Math.floor(sec % 60);
-  return `${m}:${s.toString().padStart(2, "0")}`;
-}
-
-function updateMyBetUI(data, displayData) {
-  const el = $("my-bet-info");
-  if (!el) return;
-  if (!data || !data.vote) {
-    el.classList.add("hidden");
-    return;
-  }
-  el.classList.remove("hidden");
-  const side = $("my-bet-side"); if (side) side.textContent = data.vote;
-  try {
-    const amt = (BigInt(data.amount) / BigInt(1e18)).toString();
-    const ma = $("my-bet-amount"); if (ma) ma.textContent = amt;
-  } catch(e) {
-    const ma = $("my-bet-amount"); if (ma) ma.textContent = "0";
-  }
-
-  // Disable buttons if already voted on-chain
-  const bu = $("btn-up"); if (bu) bu.disabled = true;
-  const bd = $("btn-down"); if (bd) bd.disabled = true;
-  const ba = $("bet-amount"); if (ba) ba.disabled = true;
-
-  // Add winner notification
-  const winnerText = $("winner-text");
-  if (winnerText && displayData && displayData.status === "RESOLVED") {
-      if (displayData.winner === "DRAW") {
-          // Do nothing
-      } else if (data.vote === displayData.winner) {
-          winnerText.innerHTML += ` <strong class="text-green-400 font-extrabold text-lg uppercase ml-2 animate-pulse drop-shadow-[0_0_10px_rgba(74,222,128,0.8)] border border-green-500 rounded px-2 py-1 bg-green-900/30">(YOU WON!)</strong>`;
-      } else {
-          winnerText.innerHTML += ` <strong class="text-red-500 font-bold uppercase ml-2 bg-red-900/20 px-2 py-0.5 rounded border border-red-800/50">(You lost)</strong>`;
-      }
-  }
-}
-
-// ─── Activity Log ───────────────────────────────────────────────────
-
+// ─── Activity log ───────────────────────────────────────────────────
 function addLog(msg) {
   const log = $("activity-log");
   if (!log) { console.log("[LOG]", msg); return; }
   const empty = log.querySelector(".log-empty");
   if (empty) empty.remove();
-
   const entry = document.createElement("div");
-  entry.className = "log-entry";
-  const now = new Date().toLocaleTimeString();
-  entry.innerHTML = `<span class="log-time">${now}</span>${msg}`;
+  entry.className = "log-entry border-b border-[#1a1a1a] pb-1";
+  entry.innerHTML = `<span class="text-gray-600 mr-2">${new Date().toLocaleTimeString()}</span>${msg}`;
   log.prepend(entry);
-
   while (log.children.length > 50) log.lastChild.remove();
 }
 
-// ─── Actions ────────────────────────────────────────────────────────
-
-async function placeBet(direction) {
-  const feedback = $("vote-feedback");
-  const betInput = $("bet-amount");
+// ─── Markets ────────────────────────────────────────────────────────
+async function loadMarkets() {
   try {
-    const amountGen = parseFloat(betInput?.value) || 1;
-    if (amountGen <= 0) throw new Error("Bet amount must be > 0");
-    const amountWei = parseGenToWei(amountGen);
-    
-    const roundIdNow = Number($("round-id").textContent.replace("#", "") || 0);
-    const entryPrice = document.getElementById("current-btc-price")?.textContent || "";
-    if (entryPrice) {
-      try {
-        const metas = JSON.parse(localStorage.getItem("bet_meta") || "{}");
-        metas[roundIdNow] = entryPrice;
-        localStorage.setItem("bet_meta", JSON.stringify(metas));
-      } catch(e) {}
-    }
-    const amountWeiHex = "0x" + amountWei.toString(16);
-
-    // Disable buttons immediately to prevent double clicks while signing
-    const bu = $("btn-up"); if (bu) bu.disabled = true;
-    const bd = $("btn-down"); if (bd) bd.disabled = true;
-    const ba = $("bet-amount"); if (ba) ba.disabled = true;
-
-    if (feedback) { feedback.textContent = "Confirm in wallet..."; feedback.className = "vote-feedback"; }
-
-    const fn = direction === "UP" ? "bet_up" : "bet_down";
-    const txHash = await writeContract(fn, [], amountWeiHex);
-
-    // Cập nhật UI: đang chờ confirm
-    if (feedback) {
-      feedback.textContent = "Waiting for confirmation...";
-      feedback.className = "vote-feedback";
-    }
-
-    try {
-      const client = getGenLayerClient();
-      await client.waitForTransactionReceipt({
-        hash: txHash,
-        status: TransactionStatus.ACCEPTED,
-        interval: 3000,
-        retries: 40,
-      });
-      addLog(`✅ TX accepted: ${fn}`);
-    } catch (waitErr) {
-      console.warn("TX wait timeout:", waitErr.message);
-      addLog(`⚠️ TX confirmation timeout — sẽ retry qua polling`);
-    }
-
-    // Set localBet immediately to block re-betting
-    localBet = { roundId: roundIdNow, direction, amount: amountGen };
-
-    if (feedback) { 
-      const shortTx = txHash.slice(0, 10) + "...";
-      const explorerLink = `<a href="${EXPLORER_URL}/tx/${txHash}" target="_blank" class="underline text-green-300 hover:text-green-100">${shortTx}</a>`;
-      feedback.innerHTML = `✅ Voted ${direction} ${amountGen} GEN! TX: ${explorerLink}`; 
-      feedback.className = "vote-feedback success"; 
-    }
-    const logShortTx = txHash.slice(0, 10) + "...";
-    const logLink = `<a href="${EXPLORER_URL}/tx/${txHash}" target="_blank" class="underline hover:text-white">${logShortTx}</a>`;
-    addLog(`Voted ${direction} — TX: ${logLink}`);
-
-    // Retry history polling until bet appears on-chain (up to 3 min)
-    // startHistoryRetry also renders the optimistic row immediately
-    startHistoryRetry(roundIdNow, direction, amountGen, entryPrice);
-
-    // Save optimistic bet to survive F5
-    localStorage.setItem("optimistic_bet", JSON.stringify({
-      roundId: roundIdNow,
-      direction,
-      amountGen,
-      entryPrice,
-      timestamp: Date.now()
-    }));
-
-    await pollRound();
-  } catch (err) {
-    if (feedback) { feedback.textContent = `❌ ${err.message}`; feedback.className = "vote-feedback error"; }
-    addLog(`Vote failed: ${err.message}`);
-    // Re-enable buttons if failed (and still open)
-    pollRound();
+    const raw = await readContract("get_all_markets");
+    markets = typeof raw === "string" ? JSON.parse(raw) : raw;
+    renderMarketTabs();
+    updateTradePreview();
+  } catch (e) {
+    console.warn("loadMarkets error:", e.message);
   }
 }
 
-// ─── Round Selector ──────────────────────────────────────────────────
-
-function renderRoundSelector(totalRounds, currentRoundId) {
-  const container = $("round-selector");
-  if (!container) return;
-  let html = '<span class="text-xs text-gray-500 mr-2 whitespace-nowrap">Rounds:</span>';
-  for (let r = totalRounds; r >= 1; r--) {
-    const active = (selectedRoundId === r || (selectedRoundId === null && r === currentRoundId));
-    const cls = active
-      ? "px-3 py-1 text-xs rounded-full bg-white text-black font-semibold cursor-pointer whitespace-nowrap"
-      : "px-3 py-1 text-xs rounded-full bg-[#1a1a1a] text-gray-400 hover:bg-[#2a2a2a] cursor-pointer whitespace-nowrap";
-    html += `<span class="${cls}" onclick="selectRound(${r})">#${r}</span>`;
-  }
-  // "Live" button for current round
-  const liveActive = (selectedRoundId === null);
-  const liveCls = liveActive
-    ? "px-3 py-1 text-xs rounded-full bg-green-600 text-white font-semibold cursor-pointer whitespace-nowrap"
-    : "px-3 py-1 text-xs rounded-full bg-[#1a1a1a] text-gray-400 hover:bg-[#2a2a2a] cursor-pointer whitespace-nowrap";
-  html = `<span class="${liveCls}" onclick="selectRound(null)">● LIVE</span>` + html;
-  container.innerHTML = html;
+function renderMarketTabs() {
+  const el = $("market-tabs");
+  if (!el) return;
+  const symbols = Object.keys(markets);
+  if (symbols.length === 0) { el.innerHTML = '<span class="text-gray-600 text-sm">No markets configured</span>'; return; }
+  if (!symbols.includes(selectedSymbol)) selectedSymbol = symbols[0];
+  el.innerHTML = symbols.map(sym => {
+    const m = markets[sym];
+    const cls = sym === selectedSymbol ? "tab-market active" : "tab-market";
+    const disabled = m.enabled ? "" : " (paused)";
+    return `<div class="${cls}" onclick="selectMarket('${sym}')">${sym}${disabled} <span class="text-gray-500">· up to ${m.max_leverage}x</span></div>`;
+  }).join("");
 }
 
-function selectRound(roundId) {
-  selectedRoundId = roundId;
-  if (roundId !== null) {
-    fetchParticipants(roundId);
+function selectMarket(symbol) {
+  selectedSymbol = symbol;
+  renderMarketTabs();
+  const m = markets[symbol];
+  if (m) {
+    const slider = $("leverage-slider");
+    if (slider) { slider.max = m.max_leverage; if (Number(slider.value) > m.max_leverage) slider.value = m.max_leverage; }
+    onLeverageChange();
+    const hint = $("min-margin-hint");
+    if (hint) hint.textContent = `Min margin: ${formatWeiToGen(m.min_margin)} GEN · fee ${(m.taker_fee_bps / 100).toFixed(2)}% · maintenance ${(m.maintenance_margin_bps / 100).toFixed(2)}%`;
+  }
+  const title = $("chart-title"); if (title) title.textContent = `${symbol}/USDT`;
+  loadTradingView();
+  fetchTickerPrice();
+  fetchFundingInfo();
+}
+
+function onLeverageChange() {
+  const slider = $("leverage-slider");
+  const label = $("leverage-value");
+  if (slider && label) label.textContent = slider.value + "x";
+  updateTradePreview();
+}
+
+function updateTradePreview() {
+  const m = markets[selectedSymbol];
+  const marginInput = $("margin-amount");
+  const slider = $("leverage-slider");
+  if (!m || !marginInput || !slider) return;
+  const marginGen = parseFloat(marginInput.value) || 0;
+  const lev = Number(slider.value);
+  const feeBps = m.taker_fee_bps;
+  const fee = marginGen * (feeBps / 10000);
+  const netMargin = marginGen - fee;
+  const notional = netMargin * lev;
+  $("preview-notional").textContent = notional.toFixed(4) + " GEN";
+  $("preview-fee").textContent = fee.toFixed(6) + " GEN";
+  $("preview-maxlev").textContent = m.max_leverage + "x";
+
+  // Liquidation price estimate needs the live mark price — use cached ticker if available
+  const markPrice = parseFloat(($("mark-price").dataset.raw) || "0");
+  if (markPrice > 0) {
+    const mmRatio = m.maintenance_margin_bps / 10000;
+    const adverse = (1 - mmRatio) / lev;
+    const longLiq = markPrice * (1 - adverse);
+    const shortLiq = markPrice * (1 + adverse);
+    $("preview-liq").textContent = `${fmtUsd(longLiq)} (L) / ${fmtUsd(shortLiq)} (S)`;
   } else {
-    const panel = $("participants-panel");
-    if (panel) panel.classList.add("hidden");
+    $("preview-liq").textContent = "—";
   }
-  // Re-render round selector
-  pollRound();
 }
 
-async function fetchParticipants(roundId) {
-  const panel = $("participants-panel");
-  const list = $("participants-list");
-  if (!panel || !list) return;
+// ─── Ticker (indicative display price) ───────────────────────────────
+async function fetchTickerPrice() {
+  const id = COINGECKO_IDS[selectedSymbol];
+  if (!id) return;
   try {
-    const raw = await readContract("get_round_participants", [roundId]);
-    const parts = typeof raw === "string" ? JSON.parse(raw) : raw;
-    if (!parts || parts.length === 0) {
-      list.innerHTML = '<span class="text-gray-600">No participants</span>';
-    } else {
-      list.innerHTML = parts.map((addr, i) => {
-        const short = addr.slice(0, 6) + "…" + addr.slice(-4);
-        return `<div class="flex items-center gap-2">
-          <span class="text-gray-600 w-4">${i + 1}.</span>
-          <span class="font-mono text-gray-300">${short}</span>
-        </div>`;
-      }).join("");
+    const r = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=usd`);
+    const d = await r.json();
+    const price = d?.[id]?.usd;
+    if (price) {
+      const el = $("mark-price");
+      if (el) { el.textContent = fmtUsd(price); el.dataset.raw = price; }
+      updateTradePreview();
     }
-    panel.classList.remove("hidden");
-  } catch (e) {
-    panel.classList.add("hidden");
-  }
+  } catch (e) { /* silent — indicative only */ }
 }
 
-async function claimWinnings(roundId) {
-  if (!userAccount) return;
+async function fetchFundingInfo() {
   try {
-    addLog(`Claiming winnings for round #${roundId}...`);
-    await writeContract("claim", [roundId]);
-    addLog(`✅ Claim TX sent for round #${roundId}`);
-    setTimeout(() => { pollRound(); fetchUserHistory(); }, 5000);
-  } catch (e) {
-    addLog(`❌ Claim failed: ${e.message}`);
-  }
-}
-
-// ─── Polling ────────────────────────────────────────────────────────
-
-async function pollRound() {
-  let displayData = null;
-  try {
-    const liveData = await readContract("get_round");
-    displayData = liveData;
-
-    if (selectedRoundId !== null && selectedRoundId !== Number(liveData.round_id || 0)) {
-      const res = await readContract("get_round_result", [selectedRoundId]);
-      if (res && typeof res === "string" && res !== "") {
-        const pastData = JSON.parse(res);
-        displayData = {
-          round_id: pastData.round_id,
-          status: "RESOLVED",
-          start_price: pastData.start_price,
-          end_price: pastData.end_price,
-          winner: pastData.winner,
-          round_start_time: 0,
-          betting_seconds: 0,
-          lock_seconds: 0,
-          up_pool: pastData.up_pool,
-          down_pool: pastData.down_pool,
-          up_count: pastData.up_count,
-          down_count: pastData.down_count,
-          total_rounds: liveData.total_rounds
-        };
-      } else {
-        displayData = {
-          round_id: selectedRoundId,
-          status: "IDLE",
-          start_price: 0,
-          end_price: 0,
-          winner: "NONE",
-          round_start_time: 0,
-          betting_seconds: 0,
-          lock_seconds: 0,
-          up_pool: "0",
-          down_pool: "0",
-          up_count: 0,
-          down_count: 0,
-          total_rounds: liveData.total_rounds
-        };
-      }
+    const info = await readContract("get_funding_info", [selectedSymbol]);
+    const badge = $("funding-badge");
+    if (badge) {
+      const rateBps = Number(info.last_rate_bps || 0);
+      const pct = (rateBps / 100).toFixed(3);
+      const sign = rateBps > 0 ? "longs pay" : rateBps < 0 ? "shorts pay" : "flat";
+      badge.textContent = `funding ${pct}% (${sign})`;
     }
+  } catch (e) { /* ignore */ }
+}
 
-    updateRoundUI(displayData);
+function loadTradingView() {
+  const iframe = $("tradingview-chart");
+  if (!iframe) return;
+  const symbol = TV_SYMBOLS[selectedSymbol] || TV_SYMBOLS.BTC;
+  iframe.src = `https://www.tradingview.com/widgetembed/?frameElementId=tradingview-chart&symbol=${symbol}&interval=1&hidesidetoolbar=1&symboledit=0&saveimage=0&toolbarbg=f1f3f6&studies=[]&theme=dark&style=1&timezone=Etc/UTC&studies_overrides={}&overrides={}&enabled_features=[]&disabled_features=[]&locale=en&utm_source=localhost&utm_medium=widget&utm_campaign=chart&utm_term=${symbol}`;
+}
+
+// ─── Vault status ───────────────────────────────────────────────────
+async function loadVaultStatus() {
+  try {
+    vaultStatus = await readContract("get_vault_status");
+    $("vault-balance").textContent = formatWeiToGen(vaultStatus.vault_balance) + " GEN";
+    $("vault-free").textContent = formatWeiToGen(vaultStatus.free_balance) + " GEN";
+    $("vault-positions").textContent = vaultStatus.total_positions ?? "0";
+    const badge = $("vault-badge");
+    if (badge) badge.textContent = `Vault ${formatWeiToGen(vaultStatus.free_balance, 1)} GEN free`;
+
+    const oi = await readContract("get_open_interest", [selectedSymbol]);
+    $("vault-oi").textContent = `${formatWeiToGen(oi.long, 2)} / ${formatWeiToGen(oi.short, 2)}`;
+  } catch (e) { console.warn("vault status error:", e.message); }
+}
+
+// ─── Trading actions ──────────────────────────────────────────────
+async function openPosition(direction) {
+  const feedback = $("trade-feedback");
+  const btnL = $("btn-long"), btnS = $("btn-short");
+  try {
+    const marginGen = parseFloat($("margin-amount").value) || 0;
+    if (marginGen <= 0) throw new Error("Margin must be > 0");
+    const leverage = Number($("leverage-slider").value);
+    const marginWei = parseGenToWei(marginGen);
+    const marginWeiHex = "0x" + marginWei.toString(16);
+
+    btnL.disabled = true; btnS.disabled = true;
+    if (feedback) { feedback.textContent = "Confirm in wallet..."; feedback.className = "text-xs text-center text-gray-400"; }
+
+    const txHash = await writeContract("open_position", [selectedSymbol, direction, leverage], marginWeiHex);
+
+    if (feedback) feedback.textContent = "Waiting for confirmation...";
+    try {
+      await getGenLayerClient().waitForTransactionReceipt({ hash: txHash, status: TransactionStatus.ACCEPTED, interval: 3000, retries: 60 });
+    } catch (e) { console.warn("wait timeout:", e.message); }
+
+    const shortTx = txHash.slice(0, 10) + "...";
+    const link = `<a href="${EXPLORER_URL}/tx/${txHash}" target="_blank" class="underline text-green-300 hover:text-green-100">${shortTx}</a>`;
+    if (feedback) { feedback.innerHTML = `✅ ${direction} ${selectedSymbol} ${leverage}x opened! TX: ${link}`; feedback.className = "text-xs text-center text-green-400"; }
+    addLog(`Opened ${direction} ${selectedSymbol} ${leverage}x, margin ${marginGen} GEN — TX: ${link}`);
+
+    setTimeout(() => { fetchUserPositions(); loadVaultStatus(); }, 4000);
   } catch (err) {
-    console.warn("Poll error:", err.message);
-  }
-
-  // Poll user's bet info if connected
-  if (userAccount) {
-    // Bug #1 fix: separate try-catch so fetchUserHistory always runs
-    try {
-      const myBet = await readContract("get_my_bet", [userAccount]);
-      updateMyBetUI(myBet, displayData);
-      if (myBet.vote) {
-        const payout = await readContract("get_payout", [userAccount]);
-        const mp = $("my-bet-payout");
-        if (mp) mp.textContent = payout !== "0" ? (BigInt(payout) / BigInt(1e18)).toString() + " GEN" : "—";
-      }
-    } catch (e) {
-      console.warn("get_my_bet error:", e.message);
-    }
-
-    // fetchUserHistory ALWAYS runs, independent try-catch
-    try {
-      await fetchUserHistory();
-      updateWalletBalance();
-    } catch (e) {
-      console.warn("fetchUserHistory error:", e.message);
-    }
+    if (feedback) { feedback.textContent = `❌ ${err.message}`; feedback.className = "text-xs text-center text-red-400"; }
+    addLog(`Open position failed: ${err.message}`);
+  } finally {
+    btnL.disabled = false; btnS.disabled = false;
   }
 }
 
-// ─── History retry after bet ────────────────────────────────────
-let _historyRetryTimer = null;
-function startHistoryRetry(roundId, direction, amountGen, entryPrice) {
-  if (_historyRetryTimer) clearInterval(_historyRetryTimer);
-  let attempts = 0;
-  const MAX = 36; // 36 x 5s = 3 minutes
-
-  // Show optimistic row immediately
-  const tbody = document.getElementById("history-body");
-  if (tbody) {
-    const emptyRow = tbody.querySelector("td[colspan='7']") || tbody.querySelector("td[colspan='8']");
-    if (emptyRow) emptyRow.parentElement.remove();
-    const existing = document.getElementById("optimistic-row");
-    if (!existing) {
-      const voteBadge = direction === "UP" ? '<span class="text-green-400">↑ UP</span>' : '<span class="text-red-400">↓ DOWN</span>';
-      tbody.insertAdjacentHTML('afterbegin', `<tr id="optimistic-row" class="hover:bg-white/5 transition-colors opacity-70">
-        <td class="px-4 py-3 font-mono">#${roundId}</td>
-        <td class="px-4 py-3 text-center">${voteBadge}</td>
-        <td class="px-4 py-3 text-white text-center">${amountGen} GEN</td>
-        <td class="px-4 py-3 text-center font-mono">${entryPrice || "..."}</td>
-        <td class="px-4 py-3 text-center font-mono text-gray-500">...</td>
-        <td class="px-4 py-3 text-center"><span class="text-gray-400">OPEN</span></td>
-        <td class="px-4 py-3 text-center"><span class="text-yellow-400 animate-pulse">⏳ CONFIRMING</span></td>
-        <td class="px-4 py-3 text-right"><span class="text-gray-600">—</span></td>
-      </tr>`);
-    }
-    const statsEl = document.getElementById("history-stats");
-    if (statsEl && !statsEl.textContent) statsEl.textContent = "1 bet · pending";
-  }
-
-  _historyRetryTimer = setInterval(async () => {
-    attempts++;
-    try {
-      // Fast check if the specific bet is on-chain
-      const betOnChain = await readContract("get_user_bet_for_round", [roundId, userAccount.toLowerCase()]);
-      
-      if (betOnChain && betOnChain !== "") {
-        console.log("ONCHAIN BET CONFIRMED:", betOnChain);
-        clearInterval(_historyRetryTimer);
-        _historyRetryTimer = null;
-        
-        // Fetch full history to get all details right
-        const raw = await readContract("get_user_history", [userAccount.toLowerCase()]);
-        const history = typeof raw === "string" ? JSON.parse(raw) : (Array.isArray(raw) ? raw : []);
-        
-        const opt = document.getElementById("optimistic-row");
-        if (opt) opt.remove();
-        
-        renderUserHistory(history);
-        addLog("✅ Bet confirmed on-chain!");
-        return;
-      }
-    } catch (e) { /* silent */ }
-    
-    if (attempts >= MAX) {
-      clearInterval(_historyRetryTimer);
-      _historyRetryTimer = null;
-      // Update optimistic row STATUS column (7th cell) to PENDING
-      const opt = document.getElementById("optimistic-row");
-      if (opt) {
-        const statusCell = opt.querySelector("td:nth-child(7)");
-        if (statusCell) statusCell.innerHTML = '<span class="text-yellow-400">⏳ PENDING</span>';
-      }
-    }
-  }, 5000);
-}
-
-// ─── Wallet Cache ──────────────────────────────────────────
-const WALLET_CACHE_KEY = "genlayer_last_wallet";
-const HISTORY_CACHE_PREFIX = "genlayer_history_";
-
-function cacheWallet(address) {
-  try { localStorage.setItem(WALLET_CACHE_KEY, address.toLowerCase()); } catch(e) {}
-}
-
-function getCachedWallet() {
-  try { return localStorage.getItem(WALLET_CACHE_KEY); } catch(e) { return null; }
-}
-
-function clearWalletCache() {
-  try { localStorage.removeItem(WALLET_CACHE_KEY); } catch(e) {}
-}
-
-// History persistence: survives F5 even during backend cold-start
-function cacheHistory(addr, history) {
-  if (!addr || !Array.isArray(history)) return;
+async function closePosition(positionId) {
   try {
-    localStorage.setItem(HISTORY_CACHE_PREFIX + addr.toLowerCase(), JSON.stringify(history));
-  } catch(e) {}
+    addLog(`Closing position #${positionId}...`);
+    const txHash = await writeContract("close_position", [positionId]);
+    addLog(`✅ close_position(#${positionId}) TX: ${txHash.slice(0, 10)}...`);
+    setTimeout(() => { fetchUserPositions(); loadVaultStatus(); }, 4000);
+  } catch (e) {
+    addLog(`❌ Close failed: ${e.message}`);
+  }
 }
 
-function getCachedHistory(addr) {
-  if (!addr) return null;
+async function fundVault() {
+  if (!userAccount) { alert("Connect wallet first!"); return; }
+  const amtStr = prompt("How many GEN to deposit into the vault (backs trader payouts)?", "10");
+  if (!amtStr) return;
+  const amtGen = parseFloat(amtStr);
+  if (isNaN(amtGen) || amtGen <= 0) return;
   try {
-    const raw = localStorage.getItem(HISTORY_CACHE_PREFIX + addr.toLowerCase());
-    return raw ? JSON.parse(raw) : null;
-  } catch(e) { return null; }
+    const amtWei = parseGenToWei(amtGen);
+    const txHash = await writeContract("fund_vault", [], "0x" + amtWei.toString(16));
+    addLog(`💰 fund_vault(${amtGen} GEN) TX: ${txHash.slice(0, 10)}...`);
+    setTimeout(loadVaultStatus, 4000);
+  } catch (e) {
+    addLog(`❌ Fund vault failed: ${e.message}`);
+  }
 }
 
-// Wait briefly for wallet provider injection (MetaMask may load after DOMContentLoaded)
+// ─── Positions table ──────────────────────────────────────────────
+async function fetchUserPositions() {
+  if (!userAccount) return;
+  const tbody = $("positions-body");
+  const stats = $("positions-stats");
+  try {
+    const raw = await readContract("get_user_positions", [userAccount.toLowerCase()]);
+    const positions = (typeof raw === "string" ? JSON.parse(raw) : raw) || [];
+    if (positions.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="10" class="px-4 py-8 text-center text-gray-600">No positions yet</td></tr>`;
+      if (stats) stats.textContent = "";
+      return;
+    }
+    const open = positions.filter(p => p.status === "OPEN");
+    const estimates = await Promise.all(open.map(p => readContract("estimate_position", [p.id]).catch(() => null)));
+    const estByfId = {};
+    open.forEach((p, i) => { estByfId[p.id] = estimates[i]; });
+
+    const rows = [...positions].reverse().map(p => {
+      const est = p.status === "OPEN" ? estByfId[p.id] : null;
+      const dirBadge = p.direction === "LONG"
+        ? `<span class="text-green-400">▲ LONG</span>` : `<span class="text-red-400">▼ SHORT</span>`;
+      let pnlCell = "—";
+      if (est && !est.error) {
+        const pnl = Number(est.unrealized_pnl);
+        const pnlGen = (pnl / 1e18).toFixed(4);
+        const roi = est.roi_pct;
+        const cls = pnl >= 0 ? "text-green-400" : "text-red-400";
+        pnlCell = `<span class="${cls}">${pnl >= 0 ? "+" : ""}${pnlGen} GEN (${roi}%)</span>`;
+      } else if (p.status !== "OPEN") {
+        const pnl = Number(p.realized_pnl || 0) / 1e18;
+        const cls = pnl >= 0 ? "text-green-400" : "text-red-400";
+        pnlCell = `<span class="${cls}">${pnl >= 0 ? "+" : ""}${pnl.toFixed(4)} GEN (realized)</span>`;
+      }
+      const statusBadge = p.status === "OPEN"
+        ? '<span class="text-yellow-400">OPEN</span>'
+        : p.status === "LIQUIDATED"
+        ? '<span class="text-red-500">LIQUIDATED</span>'
+        : '<span class="text-gray-500">CLOSED</span>';
+      const action = p.status === "OPEN"
+        ? `<button class="px-2 py-1 text-xs bg-white text-black rounded font-semibold hover:bg-gray-200" onclick="closePosition(${p.id})">Close</button>`
+        : `<span class="text-gray-700">—</span>`;
+      return `<tr class="hover:bg-white/5 transition-colors">
+        <td class="px-4 py-3 mono">#${p.id}</td>
+        <td class="px-4 py-3">${p.symbol}</td>
+        <td class="px-4 py-3 text-center">${dirBadge}</td>
+        <td class="px-4 py-3 text-center mono">${p.leverage}x</td>
+        <td class="px-4 py-3 text-center mono">${formatWeiToGen(p.margin)}</td>
+        <td class="px-4 py-3 text-center mono">${fmtUsd(p.entry_price)}</td>
+        <td class="px-4 py-3 text-center mono text-gray-500">${fmtUsd(p.liq_price_estimate)}</td>
+        <td class="px-4 py-3 text-center">${pnlCell}</td>
+        <td class="px-4 py-3 text-center">${statusBadge}</td>
+        <td class="px-4 py-3 text-right">${action}</td>
+      </tr>`;
+    }).join("");
+    tbody.innerHTML = rows;
+    if (stats) stats.textContent = `${positions.length} position${positions.length > 1 ? "s" : ""} · ${open.length} open`;
+  } catch (e) {
+    console.warn("fetchUserPositions error:", e.message);
+  }
+}
+
+// ─── Wallet ─────────────────────────────────────────────────────────
+const WALLET_CACHE_KEY = "genperp_last_wallet";
+function cacheWallet(a) { try { localStorage.setItem(WALLET_CACHE_KEY, a.toLowerCase()); } catch (e) {} }
+function getCachedWallet() { try { return localStorage.getItem(WALLET_CACHE_KEY); } catch (e) { return null; } }
+
 async function waitForProvider(maxMs = 2000) {
   const start = Date.now();
   while (Date.now() - start < maxMs) {
@@ -729,226 +407,40 @@ async function waitForProvider(maxMs = 2000) {
   return getProvider();
 }
 
-async function fetchUserHistory() {
-  if (!userAccount) return;
-  try {
-    const raw = await readContract("get_user_history", [userAccount.toLowerCase()]);
-    const history = typeof raw === "string" ? JSON.parse(raw) : (Array.isArray(raw) ? raw : []);
-    
-    const opt = document.getElementById("optimistic-row");
-
-    // Restore optimistic bet from F5
-    try {
-      const savedOptStr = localStorage.getItem("optimistic_bet");
-      if (savedOptStr) {
-        const savedOpt = JSON.parse(savedOptStr);
-        if (Date.now() - savedOpt.timestamp < 300000) { // 5 mins
-          const inHistory = history.some(h => String(h.round_id) === String(savedOpt.roundId));
-          if (!inHistory && !opt) {
-            startHistoryRetry(savedOpt.roundId, savedOpt.direction, savedOpt.amountGen, savedOpt.entryPrice);
-          } else if (inHistory) {
-            localStorage.removeItem("optimistic_bet");
-          }
-        } else {
-          localStorage.removeItem("optimistic_bet");
-        }
-      }
-    } catch (e) {}
-
-    if ((!history || history.length === 0) && (opt || localStorage.getItem("optimistic_bet"))) {
-      return; // Do not overwrite optimistic row if on-chain history is still empty
-    }
-    
-    // If optimistic row is present and history doesn't have it yet, we preserve it
-    if (opt && history.length > 0) {
-      const optHtml = opt.outerHTML;
-      // Get round ID from optimistic row's first cell ("#5" → "5")
-      const optRoundId = opt.querySelector("td")?.textContent.replace("#", "").trim();
-      opt.remove();
-      renderUserHistory(history);
-      const tbody = document.getElementById("history-body");
-      if (tbody && optRoundId && !history.some(h => String(h.round_id) === String(optRoundId))) {
-        tbody.insertAdjacentHTML('afterbegin', optHtml);
-      }
-    } else {
-      renderUserHistory(history);
-    }
-  } catch (e) {
-    console.warn("History fetch error:", e.message);
-    throw e; // throw error so that fetchUserHistoryWithRetry actually retries
-  }
-}
-
-// Bug #4 fix: retry wrapper for Render cold start
-async function fetchUserHistoryWithRetry(maxRetries = 3, delayMs = 3000) {
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      await fetchUserHistory();
-      return; // success
-    } catch (e) {
-      console.warn(`History fetch attempt ${i + 1}/${maxRetries} failed:`, e.message);
-      if (i < maxRetries - 1) await new Promise(r => setTimeout(r, delayMs));
-    }
-  }
-  console.warn("All history fetch retries exhausted");
-}
-
-function renderUserHistory(history) {
-  const tbody = document.getElementById("history-body");
-  const stats = document.getElementById("history-stats");
-  if (!tbody) return;
-
-  if (!history || history.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="8" class="px-4 py-8 text-center text-gray-600">No bets yet for this wallet</td></tr>`;
-    if (stats) stats.textContent = "";
-    return;
-  }
-  
-  let metas = {};
-  try { metas = JSON.parse(localStorage.getItem("bet_meta") || "{}"); } catch(e) {}
-
-  let wins = 0;
-  const rows = [...history].reverse().map(h => {
-    const amtGen = formatWeiToGen(h.amount);
-    if (h.won) wins++;
-    const voteBadge = h.vote === "UP"
-      ? `<span class="text-green-400">↑ UP</span>`
-      : `<span class="text-red-400">↓ DOWN</span>`;
-    const winnerBadge = h.winner === "UP"
-      ? `<span class="text-green-400">UP</span>`
-      : h.winner === "DOWN"
-      ? `<span class="text-red-400">DOWN</span>`
-      : h.winner === "DRAW"
-      ? `<span class="text-gray-400">DRAW</span>`
-      : `<span class="text-gray-500">PENDING</span>`;
-    const actionHtml = h.status === "CLAIM"
-      ? `<button class="px-2 py-1 text-xs bg-green-600 hover:bg-green-500 text-white rounded font-semibold" onclick="claimWinnings(${h.round_id})">Claim</button>`
-      : `<span class="text-gray-600">—</span>`;
-      
-    const entryPrice = metas[h.round_id] || "—";
-    
-    const isWin = h.status === "CLAIM" || h.status === "CLAIMED";
-    const isLoss = h.status === "LOST";
-    const rowClass = isWin ? "bg-green-900/20 hover:bg-green-900/30" : isLoss ? "bg-red-900/10 hover:bg-red-900/20" : "hover:bg-white/5";
-
-    return `<tr class="${rowClass} transition-colors border-b border-[#1a1a1a]/50">
-      <td class="px-4 py-3 font-mono">#${h.round_id}</td>
-      <td class="px-4 py-3 text-center">${voteBadge}</td>
-      <td class="px-4 py-3 text-white text-center">${amtGen} GEN</td>
-      <td class="px-4 py-3 text-center font-mono">${entryPrice}</td>
-      <td class="px-4 py-3 text-center font-mono text-gray-400">$${h.start_price} → $${h.end_price}</td>
-      <td class="px-4 py-3 text-center">${winnerBadge}</td>
-      <td class="px-4 py-3 text-center">${renderHistoryStatus(h.status)}</td>
-      <td class="px-4 py-3 text-right">${actionHtml}</td>
-    </tr>`;
-  }).join("");
-
-  tbody.innerHTML = rows;
-  if (stats) stats.textContent = `${history.length} bet${history.length > 1 ? 's' : ''} · ${wins} win${wins !== 1 ? 's' : ''}`;
-
-  // Persist for F5 — next page load can render this immediately while wallet reconnects
-  if (userAccount) cacheHistory(userAccount, history);
-}
-
-let _timerTick = null;
-
-function startPolling() {
-  if (pollInterval) clearInterval(pollInterval);
-  if (_timerTick) clearInterval(_timerTick);
-  pollRound();
-  // Poll backend every 10 seconds for fresh data
-  pollInterval = setInterval(() => {
-    pollRound();
-  }, 10000);
-  // Tick timer every 1 second for smooth countdown
-  _timerTick = setInterval(() => {
-    if (_lastRoundData) {
-      const d = _lastRoundData;
-      updateTimer(d.status || "IDLE", Number(d.round_start_time || 0), Number(d.betting_seconds || 300), Number(d.lock_seconds || 300), Number(d.round_id || 0));
-    }
-  }, 1000);
-}
-
-// Helper: fetch and display wallet balance
 async function updateWalletBalance() {
   if (!userAccount) return;
   try {
     const provider = getProvider();
     const balanceWei = await provider.request({ method: "eth_getBalance", params: [userAccount, "latest"] });
-    const balanceGen = parseFloat(formatWeiToGen(balanceWei)).toFixed(2);
     const el = $("wallet-balance");
-    if (el) {
-      el.textContent = `${balanceGen} GEN`;
-      el.classList.remove("hidden");
-    }
-  } catch (e) {
-    console.warn("Failed to fetch balance:", e);
-  }
-}
-
-// Helper: detect wallet provider (MetaMask, OKX, etc.)
-function getProvider() {
-  if (window.ethereum) return window.ethereum;
-  if (window.okxwallet) return window.okxwallet;
-  return null;
+    if (el) { el.textContent = `${formatWeiToGen(BigInt(balanceWei), 2)} GEN`; el.classList.remove("hidden"); }
+  } catch (e) { console.warn("balance fetch failed:", e); }
 }
 
 async function connectWallet() {
-  if (!CONFIG.contractAddress) {
-    openConfig();
-    return;
-  }
-
-  const dot = $("connection-status");
-  const label = $("connection-label");
-  const btn = $("btn-connect");
-
+  if (!CONFIG.contractAddress) { openConfig(); return; }
+  const label = $("connection-label"), btn = $("btn-connect");
   const provider = getProvider();
-  if (!provider) {
-    if (dot) dot.className = "status-dot status-dot--disconnected";
-    if (label) label.textContent = "No wallet found";
-    addLog("❌ No wallet detected. Install MetaMask or OKX Wallet.");
-    return;
-  }
-
+  if (!provider) { addLog("❌ No wallet detected. Install MetaMask or OKX Wallet."); return; }
   try {
     const accounts = await provider.request({ method: "eth_requestAccounts" });
     userAccount = accounts[0];
     cacheWallet(userAccount);
-
     await ensureStudioChain();
-
-    if (dot) dot.className = "status-dot status-dot--connected";
     if (label) { label.textContent = userAccount.slice(0, 8) + "..."; label.classList.remove("hidden"); }
     if (btn) btn.textContent = "Connected";
     addLog(`Connected: ${userAccount.slice(0, 10)}...`);
     updateWalletBalance();
+    fetchUserPositions();
 
-    // Immediately load history for this wallet (with retry for Render cold start)
-    fetchUserHistoryWithRetry();
-
-    // Bug #3 fix: accountsChanged reloads history + caches new wallet
     provider.on("accountsChanged", (accs) => {
-      if (accs.length === 0) {
-        disconnectWallet();
-        clearWalletCache();
-      } else {
-        userAccount = accs[0];
-        cacheWallet(userAccount);
-        const lbl = $("connection-label"); if (lbl) lbl.textContent = userAccount.slice(0, 8) + "...";
-        addLog(`Account changed: ${userAccount.slice(0, 10)}...`);
-        fetchUserHistoryWithRetry();
-      }
+      if (accs.length === 0) { disconnectWallet(); }
+      else { userAccount = accs[0]; cacheWallet(userAccount); if (label) label.textContent = userAccount.slice(0, 8) + "..."; fetchUserPositions(); }
     });
-
-    provider.on("chainChanged", () => {
-      addLog("Network changed — reconnecting...");
-      connectWallet();
-    });
+    provider.on("chainChanged", () => connectWallet());
 
     startPolling();
   } catch (e) {
-    if (dot) dot.className = "status-dot status-dot--disconnected";
     if (label) label.textContent = "Rejected";
     if (btn) btn.textContent = "Connect";
     addLog(`Connection failed: ${e.message}`);
@@ -957,132 +449,88 @@ async function connectWallet() {
 
 function disconnectWallet() {
   userAccount = null;
-  if (pollInterval) clearInterval(pollInterval);
-  const dot = $("connection-status"); if (dot) dot.className = "status-dot status-dot--disconnected";
   const label = $("connection-label"); if (label) { label.textContent = "Disconnected"; label.classList.add("hidden"); }
   const bal = $("wallet-balance"); if (bal) bal.classList.add("hidden");
   const btn = $("btn-connect"); if (btn) btn.textContent = "Connect";
   addLog("Wallet disconnected");
 }
 
-// ─── Config Modal ───────────────────────────────────────────────────
-
+// ─── Config modal ───────────────────────────────────────────────────
 function openConfig() {
-  const ir = $("input-rpc"); if (ir) ir.value = CONFIG.backendUrl;
-  const ic = $("input-contract"); if (ic) ic.value = CONFIG.contractAddress;
-  const cm = $("config-modal"); if (cm) cm.classList.remove("hidden");
+  $("input-rpc").value = CONFIG.backendUrl;
+  $("input-contract").value = CONFIG.contractAddress;
+  $("config-modal").classList.remove("hidden");
 }
-
-function closeConfig() {
-  const cm = $("config-modal"); if (cm) cm.classList.add("hidden");
-}
-
+function closeConfig() { $("config-modal").classList.add("hidden"); }
 function saveConfig() {
-  const ir = $("input-rpc"); if (ir) CONFIG.backendUrl = ir.value.trim();
-  const ic = $("input-contract"); if (ic) CONFIG.contractAddress = ic.value.trim();
+  CONFIG.backendUrl = $("input-rpc").value.trim();
+  CONFIG.contractAddress = $("input-contract").value.trim();
   localStorage.setItem("backend_url", CONFIG.backendUrl);
   localStorage.setItem("contract_address", CONFIG.contractAddress);
   closeConfig();
+  loadMarkets(); loadVaultStatus();
   connectWallet();
 }
 
-// ─── TradingView Widget ────────────────────────────────────────────
+// ─── Polling ────────────────────────────────────────────────────────
+// The GenLayer Studio RPC caps requests at ~30/minute, shared across every browser
+// tab and the keeper. Market configs only change on an admin call, so refreshing
+// them every tick wastes most of that budget — reload them occasionally instead.
+let _pollTick = 0;
+const MARKETS_EVERY_N_POLLS = 10;
 
-function loadTradingView() {
-  const iframe = document.getElementById("tradingview-chart");
-  if (!iframe) return;
-  const url = `https://www.tradingview.com/widgetembed/?frameElementId=tradingview-chart&symbol=BINANCE:BTCUSDT&interval=1&hidesidetoolbar=1&symboledit=0&saveimage=0&toolbarbg=f1f3f6&studies=[]&theme=dark&style=1&timezone=Etc/UTC&studies_overrides={}&overrides={}&enabled_features=[]&disabled_features=[]&locale=en&utm_source=localhost&utm_medium=widget&utm_campaign=chart&utm_term=BINANCE:BTCUSDT`;
-  iframe.src = url;
-}
-
-async function fetchBTCPrice() {
-  try {
-    const r = await fetch("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT");
-    const d = await r.json();
-    const price = parseFloat(d.price);
-    if (price) {
-      const el = $("current-btc-price");
-      if (el) el.textContent = `$${price.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
-    }
-  } catch (e) {}
+function startPolling() {
+  if (pollInterval) clearInterval(pollInterval);
+  if (tickerInterval) clearInterval(tickerInterval);
+  loadMarkets(); loadVaultStatus(); fetchFundingInfo();
+  pollInterval = setInterval(() => {
+    _pollTick++;
+    if (_pollTick % MARKETS_EVERY_N_POLLS === 0) loadMarkets();
+    loadVaultStatus();
+    fetchFundingInfo();
+    if (userAccount) { fetchUserPositions(); updateWalletBalance(); }
+  }, 12000);
+  tickerInterval = setInterval(fetchTickerPrice, 15000);
 }
 
 // ─── Init ───────────────────────────────────────────────────────────
-
 document.addEventListener("DOMContentLoaded", async () => {
-  // Load contract address from backend (authoritative source)
   try {
     const r = await fetch(CONFIG.backendUrl + "/api/config");
     const d = await r.json();
-    if (d.contractAddress) {
-      CONFIG.contractAddress = d.contractAddress;
-      console.log("Loaded contract address from backend:", CONFIG.contractAddress);
-    }
-  } catch (e) {
-    console.warn("Failed to load config from backend, using default.");
-  }
+    if (d.contractAddress) CONFIG.contractAddress = d.contractAddress;
+  } catch (e) { console.warn("Failed to load config from backend, using default."); }
 
-  // Clear stale localStorage overrides that cause wrong contract on reload
   localStorage.removeItem("backend_url");
   localStorage.removeItem("contract_address");
 
+  renderMarketTabs();
   loadTradingView();
-  fetchBTCPrice();
-  setInterval(fetchBTCPrice, 15000); // refresh BTC price every 15s
+  fetchTickerPrice();
   startPolling();
 
-  // Render cached history immediately on F5 so users don't see an empty table
-  // while wallet reconnects / backend cold-starts. Will be replaced by fresh data on first poll.
   const cached = getCachedWallet();
-  if (cached) {
-    const cachedHistory = getCachedHistory(cached);
-    if (cachedHistory && cachedHistory.length > 0) {
-      renderUserHistory(cachedHistory);
-    }
-  }
-
-  // Auto-reconnect — wait for provider injection (MetaMask may load late after F5)
   const initProvider = await waitForProvider();
   if (cached && initProvider) {
     initProvider.request({ method: "eth_accounts" }).then(async (accounts) => {
-      if (accounts && accounts.length > 0) {
-        const matched = accounts.find(a => a.toLowerCase() === cached);
-        if (matched) {
-          addLog(`↻ Auto-reconnecting cached wallet...`);
-          await connectWallet(); // full reconnect: events + dot + history + polling
-        }
+      if (accounts && accounts.find(a => a.toLowerCase() === cached)) {
+        addLog("↻ Auto-reconnecting cached wallet...");
+        await connectWallet();
       }
     }).catch(() => {});
   }
+
+  $("margin-amount").addEventListener("input", updateTradePreview);
 });
 
-// ─── Export to Window for HTML event listeners ───────────────────────
+// ─── Exports for inline HTML handlers ────────────────────────────────
 window.connectWallet = connectWallet;
 window.disconnectWallet = disconnectWallet;
-window.placeBet = placeBet;
-window.claimWinnings = claimWinnings;
-window.selectRound = selectRound;
+window.selectMarket = selectMarket;
+window.onLeverageChange = onLeverageChange;
+window.openPosition = openPosition;
+window.closePosition = closePosition;
+window.fundVault = fundVault;
 window.openConfig = openConfig;
 window.closeConfig = closeConfig;
 window.saveConfig = saveConfig;
-
-// ─── Admin Tools ──────────────────────────────────────────────────
-async function fundContract() {
-  if (!userAccount) {
-    alert("Connect wallet first!");
-    return;
-  }
-  const amtStr = prompt("How many GEN to fund into the contract?", "10");
-  if (!amtStr) return;
-  const amtGen = parseFloat(amtStr);
-  if (isNaN(amtGen) || amtGen <= 0) return;
-  const amtWei = BigInt(Math.floor(amtGen * 1e18));
-  const amountWeiHex = "0x" + amtWei.toString(16);
-  try {
-    const txHash = await writeContract("fund", [], amountWeiHex);
-    alert("Fund transaction sent! Hash: " + txHash.substring(0,10) + "...");
-  } catch (e) {
-    alert("Fund error: " + e.message);
-  }
-}
-window.fundContract = fundContract;

@@ -4,7 +4,6 @@ const path = require("path");
 const { createClient } = require("genlayer-js");
 const { privateKeyToAccount } = require("viem/accounts");
 const { localnet } = require("genlayer-js/chains");
-const { TransactionStatus } = require("genlayer-js/types");
 
 // Manually parse .env to avoid dotenv v17 corruption
 function loadEnv() {
@@ -18,76 +17,35 @@ function loadEnv() {
       if (eqIdx === -1) continue;
       const key = trimmed.slice(0, eqIdx).trim();
       const val = trimmed.slice(eqIdx + 1).trim();
-      process.env[key] = val; // always override, dotenv v17 may have corrupted
+      process.env[key] = val;
     }
   } catch (e) { console.warn("Could not load .env:", e.message); }
 }
 loadEnv();
 
-const PORT = 3005;
+const PORT = process.env.PORT || 3005;
 const RPC_URL = process.env.GENLAYER_RPC_URL || "https://studio.genlayer.com/api";
-const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS || "0x6a50708F562E635FD1319fFeB723b9D6568CE3A2";
-
-let cachedRound = null;
-const roundHistory = {}; // rid -> result JSON, cached by backend when round resolves
+const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS || "";
+// Each sweep sends one touch_price transaction per market (plus any liquidations),
+// so this interval is a direct gas cost. 60s keeps mark prices fresh enough for
+// liquidation detection without burning gas on a 3-market loop.
+const KEEPER_INTERVAL_MS = parseInt(process.env.KEEPER_INTERVAL_MS || "60000", 10);
 
 const rawPk = process.env.PRIVATE_KEY || "";
 const privateKey = rawPk.startsWith("0x") ? rawPk : `0x${rawPk}`;
 const account = privateKeyToAccount(privateKey);
 
 const studioChain = { ...localnet, id: 61999 };
-const client = createClient({
-  chain: studioChain,
-  endpoint: RPC_URL,
-  account,
-});
+const client = createClient({ chain: studioChain, endpoint: RPC_URL, account });
 
-// ─── Fetch BTC price with multi-source fallback + NaN validation ──
-// Render datacenters are often blocked by Binance — must validate and try alternatives.
-async function fetchBTCPrice() {
-  const sources = [
-    {
-      name: "Binance",
-      url: "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
-      extract: (d) => d?.price,
-    },
-    {
-      name: "CoinGecko",
-      url: "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
-      extract: (d) => d?.bitcoin?.usd,
-    },
-    {
-      name: "Coinbase",
-      url: "https://api.coinbase.com/v2/prices/BTC-USD/spot",
-      extract: (d) => d?.data?.amount,
-    },
-    {
-      name: "Kraken",
-      url: "https://api.kraken.com/0/public/Ticker?pair=XBTUSD",
-      extract: (d) => d?.result?.XXBTZUSD?.c?.[0],
-    },
-  ];
-
-  for (const src of sources) {
-    try {
-      const r = await fetch(src.url, { signal: AbortSignal.timeout(8000) });
-      const d = await r.json();
-      const raw = src.extract(d);
-      const price = parseFloat(raw);
-      if (Number.isFinite(price) && price > 0) {
-        const formatted = price.toFixed(2);
-        console.log(`[PRICE] BTC = $${formatted} (${src.name})`);
-        return formatted;
-      }
-      console.warn(`[PRICE] ${src.name} returned invalid: ${JSON.stringify(d).slice(0, 160)}`);
-    } catch (e) {
-      console.warn(`[PRICE] ${src.name} failed: ${e.message}`);
-    }
-  }
-
-  console.error(`[PRICE] All price feeds failed — returning null`);
-  return null;
-}
+// Writes exposed through the public HTTP API are keeper-only actions — they are
+// designed to be permissionless on-chain (anyone calling them is fine/expected),
+// so letting the backend's key execute them for convenience is safe. Trading
+// actions (open_position/close_position/fund_vault/withdraw_vault/add_market/...)
+// spend or move the CALLER's funds and must always be signed by the user's own
+// wallet directly in the browser (see frontend/app.js writeContract()) — never
+// routed through this backend, which would otherwise spend the admin's GEN.
+const KEEPER_WRITE_ALLOWLIST = new Set(["touch_price", "liquidate_position", "settle_funding"]);
 
 function cors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -101,92 +59,61 @@ function json(res, data, status = 200) {
   res.end(JSON.stringify(data));
 }
 
-// Cached results per method for fallback
-const readCache = {};
-
 function withTimeout(promise, ms) {
   return Promise.race([
     promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error(`RPC timeout after ${ms}ms`)), ms))
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`RPC timeout after ${ms}ms`)), ms)),
   ]);
 }
 
-async function handleRead(method, args) {
+// Read cache. Two jobs: absorb repeat reads inside a short window, and keep serving
+// the last-known value when the RPC is unavailable.
+//
+// The GenLayer Studio RPC allows only ~30 requests/minute. Every browser tab polls
+// several views on a loop and the keeper sweeps every market, so without this the
+// limit is blown within seconds and reads start failing. Contract state only changes
+// when a transaction is accepted (~1 min), so a short TTL costs no real freshness.
+const readCache = {};
+const READ_TTL_MS = parseInt(process.env.READ_TTL_MS || "10000", 10);
+// Market configs change only on an admin call — cache them far longer.
+const LONG_TTL_METHODS = new Set(["get_all_markets", "get_market", "get_owner"]);
+const LONG_TTL_MS = 120000;
+
+async function handleRead(method, args, { allowStale = true } = {}) {
   const cacheKey = method + JSON.stringify(args || []);
+  const ttl = LONG_TTL_METHODS.has(method) ? LONG_TTL_MS : READ_TTL_MS;
+  const hit = readCache[cacheKey];
+  if (hit && Date.now() - hit.ts < ttl) return hit.value;
+
   try {
     const result = await withTimeout(
-      client.readContract({
-        address: CONTRACT_ADDRESS,
-        functionName: method,
-        args: args || [],
-      }),
-      25000  // 25s timeout — Render default is 30s
+      client.readContract({ address: CONTRACT_ADDRESS, functionName: method, args: args || [] }),
+      25000
     );
-    readCache[cacheKey] = result; // update cache on success
+    readCache[cacheKey] = { value: result, ts: Date.now() };
     return result;
   } catch (e) {
-    // If we have a cached result, return it with a flag
-    if (readCache[cacheKey] !== undefined) {
-      console.warn(`[RPC] ${method} failed (${e.message}), serving from cache`);
-      return readCache[cacheKey];
+    if (allowStale && hit !== undefined) {
+      console.warn(`[RPC] ${method} failed (${e.message}), serving stale cache`);
+      return hit.value;
     }
     throw e;
   }
 }
 
-async function handleWrite(method, args, valueWei = "0") {
-  const hash = await client.writeContract({
-    address: CONTRACT_ADDRESS,
-    functionName: method,
-    args: args || [],
-    value: BigInt(valueWei),
-  });
+// Drop cached reads for a symbol after we mutate its state, so the next poll is fresh.
+function invalidateCache() {
+  for (const k of Object.keys(readCache)) {
+    if (!LONG_TTL_METHODS.has(k.split("[")[0])) delete readCache[k];
+  }
+}
+
+async function handleWrite(method, args) {
+  if (!KEEPER_WRITE_ALLOWLIST.has(method)) {
+    throw new Error(`Method '${method}' cannot be executed by the backend — sign it with your own wallet`);
+  }
+  const hash = await client.writeContract({ address: CONTRACT_ADDRESS, functionName: method, args: args || [] });
   return { txHash: hash };
-}
-
-// Recent TX log for system actions (start/lock/resolve)
-const recentTxs = [];
-function logTx(action, txHash, roundId, status = "PENDING") {
-  const entry = {
-    action,
-    txHash,
-    roundId,
-    status,
-    timestamp: Math.floor(Date.now() / 1000),
-  };
-  recentTxs.unshift(entry);
-  if (recentTxs.length > 20) recentTxs.length = 20;
-  return entry;
-}
-
-async function trackTxStatus(entry) {
-  // ACCEPTED first (faster, ~10s), then FINALIZED in background
-  try {
-    await client.waitForTransactionReceipt({
-      hash: entry.txHash,
-      status: TransactionStatus.ACCEPTED,
-      interval: 3000,
-      retries: 60,
-    });
-    entry.status = "ACCEPTED";
-    console.log(`[TX] ${entry.action} #${entry.roundId} ACCEPTED`);
-  } catch (e) {
-    entry.status = "FAILED";
-    console.error(`[TX] ${entry.action} #${entry.roundId} FAILED: ${e.message}`);
-    return;
-  }
-  try {
-    await client.waitForTransactionReceipt({
-      hash: entry.txHash,
-      status: TransactionStatus.FINALIZED,
-      interval: 5000,
-      retries: 120,
-    });
-    entry.status = "FINALIZED";
-    console.log(`[TX] ${entry.action} #${entry.roundId} FINALIZED`);
-  } catch (e) {
-    // remain ACCEPTED
-  }
 }
 
 const server = http.createServer(async (req, res) => {
@@ -199,31 +126,8 @@ const server = http.createServer(async (req, res) => {
 
   const url = new URL(req.url, `http://localhost:${PORT}`);
 
-  if (req.method === "GET" && url.pathname === "/api/round") {
-    try {
-      const data = cachedRound || await handleRead("get_round", []);
-      json(res, data);
-    } catch (e) {
-      json(res, { error: e.message }, 500);
-    }
-    return;
-  }
-
-  if (req.method === "GET" && url.pathname.startsWith("/api/past-round/")) {
-    const rid = parseInt(url.pathname.split("/").pop());
-    // Serve from backend cache first (ContractState writes break resolve_round)
-    if (roundHistory[rid]) {
-      try {
-        json(res, JSON.parse(roundHistory[rid]));
-        return;
-      } catch (e) { /* fall through */ }
-    }
-    try {
-      const data = await handleRead("get_past_round", [rid]);
-      json(res, data);
-    } catch (e) {
-      json(res, { error: e.message }, 500);
-    }
+  if (req.method === "GET" && url.pathname === "/api/config") {
+    json(res, { contractAddress: CONTRACT_ADDRESS });
     return;
   }
 
@@ -232,32 +136,13 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === "GET" && url.pathname === "/api/txs") {
-    json(res, { txs: recentTxs });
-    return;
-  }
-  if (req.method === "GET" && url.pathname === "/api/config") {
-    json(res, { contractAddress: CONTRACT_ADDRESS });
-    return;
-  }
-
   if (req.method === "POST" && url.pathname === "/api/call") {
     let body = "";
     req.on("data", (chunk) => (body += chunk));
     req.on("end", async () => {
       try {
-        const { method, args, type, value } = JSON.parse(body);
-        let result;
-        if (type === "write") {
-          result = await handleWrite(method, args, value || "0");
-        } else {
-          // Serve get_round from cache if available to prevent RPC spam
-          if (method === "get_round" && cachedRound) {
-            result = cachedRound;
-          } else {
-            result = await handleRead(method, args);
-          }
-        }
+        const { method, args, type } = JSON.parse(body);
+        const result = type === "write" ? await handleWrite(method, args) : await handleRead(method, args);
         json(res, result);
       } catch (e) {
         json(res, { error: e.message }, 500);
@@ -269,211 +154,103 @@ const server = http.createServer(async (req, res) => {
   json(res, { error: "Not found" }, 404);
 });
 
-// ─── Verify state after TX ─────────────────────────────────────────
-async function waitAndVerifyState(action, expectedRoundId) {
-  for (let i = 0; i < 24; i++) {
-    await new Promise(r => setTimeout(r, 5000));
-    try {
-      const r = await handleRead("get_round", []);
-      const rid = Number(r.round_id || 0);
-      const st = r.status || "IDLE";
-      console.log(`[VERIFY] ${action} round=${rid} status=${st} start=${r.start_price}`);
-      if (action === "lock_round"    && st === "LOCKED")   return true;
-      if (action === "resolve_round" && st === "RESOLVED") return true;
-      if (action === "start_round"   && st === "OPEN" && rid === expectedRoundId) return true;
-    } catch (e) { console.log(`[VERIFY] read error: ${e.message}`); }
-  }
-  return false;
+// ─── Keeper loop: refresh prices, liquidate at-risk positions, settle funding ──
+function priceChangePct(entry, current, direction) {
+  if (entry === 0) return 0;
+  return direction === "LONG" ? (current - entry) / entry : (entry - current) / entry;
 }
 
-// ─── Auto round manager ────────────────────────────────────────────
-async function startCron() {
-  let lastActionRound = 0;
-  let lastActionType  = "";
-  let lastActionTime  = 0;
-  let resolveFailures = 0;
-  let lockFailures    = 0;
-  let resolveBackoffUntil = 0;
-  let pendingAction   = null; // blocks cron while verifying state
+async function sweepMarket(symbol, market) {
+  if (!market.enabled) return;
 
-  // Self-heal: when a round is bricked (e.g., corrupt on-chain price prevents
-  // resolve_round from finalizing) we call admin_reset_to_idle on-chain so the
-  // next tick can start a fresh round. No human intervention needed.
-  async function autoReset(reason) {
-    console.error(`[CRON] 🚨 Auto-reset triggered: ${reason}`);
-    try {
-      const tx = await handleWrite("admin_reset_to_idle", []);
-      console.log(`[CRON]   Reset TX: ${tx.txHash}`);
-      logTx("admin_reset", tx.txHash, lastActionRound);
-      resolveFailures = 0;
-      lockFailures = 0;
-      resolveBackoffUntil = 0;
-      lastActionType = "";
-      lastActionRound = 0;
-      pendingAction = null;
-    } catch (e) {
-      console.error(`[CRON]   admin_reset_to_idle failed: ${e.message}`);
+  // Check for open positions FIRST. With none, there is nothing to liquidate and no
+  // reason to spend gas refreshing the mark price — an idle market should cost one
+  // cheap read per sweep, not a transaction.
+  let positions = [];
+  try {
+    const raw = await handleRead("get_open_positions_for_symbol", [symbol]);
+    positions = JSON.parse(raw || "[]");
+  } catch (e) {
+    console.error(`[KEEPER] reading ${symbol} positions failed: ${e.message}`);
+    return;
+  }
+  if (positions.length === 0) return;
+
+  let markPrice = 0;
+  try {
+    const tx = await handleWrite("touch_price", [symbol]);
+    invalidateCache();
+    const cached = await handleRead("get_mark_price", [symbol]);
+    markPrice = parseFloat(cached.price || "0");
+    console.log(`[KEEPER] ${symbol} touch_price TX ${tx.txHash.slice(0, 10)}... mark≈$${markPrice}`);
+  } catch (e) {
+    console.error(`[KEEPER] touch_price(${symbol}) failed: ${e.message}`);
+    return;
+  }
+  if (!(markPrice > 0)) return;
+
+  try {
+    for (const p of positions) {
+      const entry = parseFloat(p.entry_price);
+      const margin = Number(BigInt(p.margin));
+      const notional = Number(BigInt(p.notional));
+      const pct = priceChangePct(entry, markPrice, p.direction);
+      const pnl = notional * pct;
+      const equity = margin + pnl;
+      const maintenance = margin * (Number(market.maintenance_margin_bps) / 10000);
+      if (equity <= maintenance) {
+        try {
+          const tx = await handleWrite("liquidate_position", [p.id]);
+          console.log(`[KEEPER] liquidated #${p.id} (${symbol} ${p.direction}) TX ${tx.txHash}`);
+        } catch (e) {
+          console.log(`[KEEPER] liquidate_position(${p.id}) skipped: ${e.message}`);
+        }
+      }
     }
+  } catch (e) {
+    console.error(`[KEEPER] scanning ${symbol} failed: ${e.message}`);
   }
 
-  // Bootstrap: read chain state so we don't re-send actions after restart
   try {
-    const boot = await handleRead("get_round", []);
-    const bootRound  = Number(boot.round_id || 0);
-    const bootStatus = boot.status || "IDLE";
-    const now0 = Math.floor(Date.now() / 1000);
-    if (bootStatus === "LOCKED") {
-      lastActionType = "lock"; lastActionRound = bootRound; lastActionTime = now0 - 60;
-      console.log(`[BOOT] Round #${bootRound} already LOCKED — skip re-lock`);
-    } else if (bootStatus === "RESOLVED") {
-      lastActionType = "resolve"; lastActionRound = bootRound; lastActionTime = now0 - 60;
-      console.log(`[BOOT] Round #${bootRound} already RESOLVED`);
-    } else if (bootStatus === "OPEN") {
-      const bootStart   = Number(boot.round_start_time || 0);
-      const bootBetting = Number(boot.betting_seconds  || 300);
-      if (now0 >= bootStart + bootBetting + 10) {
-        // Betting already ended — allow lock on next tick, but don't spam
-        lastActionType = "start"; lastActionRound = bootRound; lastActionTime = now0 - 130;
-        console.log(`[BOOT] Round #${bootRound} OPEN betting ended — will lock next tick`);
-      } else {
-        console.log(`[BOOT] Round #${bootRound} OPEN betting active`);
-      }
-    } else {
-      console.log(`[BOOT] Contract: ${bootStatus}`);
+    const finfo = await handleRead("get_funding_info", [symbol]);
+    const now = Math.floor(Date.now() / 1000);
+    const elapsed = now - Number(finfo.last_ts || 0);
+    if (elapsed >= Number(market.funding_interval_seconds)) {
+      const tx = await handleWrite("settle_funding", [symbol]);
+      console.log(`[KEEPER] settle_funding(${symbol}) TX ${tx.txHash}`);
     }
-  } catch (e) { console.log("[BOOT] Could not read chain state:", e.message); }
+  } catch (e) {
+    console.log(`[KEEPER] settle_funding(${symbol}) skipped: ${e.message}`);
+  }
+}
 
+async function startKeeper() {
+  if (!CONTRACT_ADDRESS) {
+    console.warn("[KEEPER] CONTRACT_ADDRESS not set — keeper disabled, serving reads only");
+    return;
+  }
   let inFlight = false;
-
   setInterval(async () => {
-    if (pendingAction) {
-      console.log(`[CRON] Waiting for ${pendingAction} to confirm on-chain...`);
-      return;
-    }
-
     if (inFlight) return;
     inFlight = true;
     try {
-      const round = await handleRead("get_round", []);
-      cachedRound = round;
-      const now      = Math.floor(Date.now() / 1000);
-      const roundId  = Number(round.round_id || 0);
-      const status   = round.status || "IDLE";
-      const roundStart = Number(round.round_start_time || 0);
-      const bettingSec = Number(round.betting_seconds  || 300);
-      const lockSec    = Number(round.lock_seconds     || 300);
-
-      // If we already acted on this round, wait before retry
-      if (lastActionRound === roundId && lastActionType !== "start") {
-        if ((now - lastActionTime) < 10) return;
-      }
-      // Safety: clear stale pendingAction after 3 min
-      if (pendingAction && (now - lastActionTime) > 180) {
-        console.log(`[CRON] Clearing stale pendingAction: ${pendingAction}`);
-        pendingAction = null;
-      }
-
-      // ── START ──────────────────────────────────────────
-      if (status === "IDLE" || status === "RESOLVED") {
-        if (lastActionType === "start" && (now - lastActionTime) < 60) return;
-        const nextId = roundId + 1;
-        console.log(`[CRON] ▶ Starting round ${nextId}...`);
-        const tx = await handleWrite("start_round", []);
-        console.log(`[CRON]   TX: ${tx.txHash}`);
-        logTx("start_round", tx.txHash, nextId);
-        lastActionTime = now; lastActionType = "start"; lastActionRound = nextId;
-        resolveFailures = 0; resolveBackoffUntil = 0;
-        pendingAction = "start_round";
-        waitAndVerifyState("start_round", nextId).then(ok => {
-          pendingAction = null;
-          if (!ok) console.error(`[STATE ERROR] start_round #${nextId}: state did not become OPEN`);
-        });
-        return;
-      }
-
-      // ── LOCK ───────────────────────────────────────────
-      if (status === "OPEN") {
-        const bettingEnd = roundStart + bettingSec;
-        if (now >= bettingEnd + 10) {
-          if (lastActionType === "lock" && (now - lastActionTime) < 120) return;
-          console.log(`[CRON] 🔒 Locking round ${roundId}...`);
-          const price = await fetchBTCPrice();
-          if (!price) { console.error(`[CRON] Cannot lock: price unavailable`); return; }
-          const tx = await handleWrite("lock_round", [price]);
-          console.log(`[CRON]   TX: ${tx.txHash}`);
-          logTx("lock_round", tx.txHash, roundId);
-          lastActionTime = now; lastActionType = "lock"; lastActionRound = roundId;
-          pendingAction = "lock_round";
-          waitAndVerifyState("lock_round", roundId).then(async (ok) => {
-            pendingAction = null;
-            if (ok) {
-              lockFailures = 0;
-            } else {
-              lockFailures++;
-              console.error(`[STATE ERROR] lock_round #${roundId} failed (${lockFailures}/3). Status still OPEN.`);
-              lastActionType = ""; lastActionRound = 0;
-              if (lockFailures >= 3) {
-                await autoReset(`lock_round #${roundId} failed 3x`);
-              }
-            }
-          });
-        }
-        return;
-      }
-
-      // ── RESOLVE ────────────────────────────────────────
-      if (status === "LOCKED") {
-        const lockEnd = roundStart + bettingSec + lockSec;
-        if (now >= lockEnd + 10) {
-          if (resolveBackoffUntil > 0 && now < resolveBackoffUntil) return;
-          if (lastActionType === "resolve" && (now - lastActionTime) < 120) return;
-          console.log(`[CRON] ✅ Resolving round ${roundId}...`);
-          const price = await fetchBTCPrice();
-          if (!price) { console.error(`[CRON] Cannot resolve: price unavailable`); return; }
-          const tx = await handleWrite("resolve_round", [price]);
-          console.log(`[CRON]   TX: ${tx.txHash}`);
-          logTx("resolve_round", tx.txHash, roundId);
-          lastActionTime = now; lastActionType = "resolve"; lastActionRound = roundId;
-          resolveBackoffUntil = 0; // failures counter persists until success or auto-reset
-          pendingAction = "resolve_round";
-          waitAndVerifyState("resolve_round", roundId).then(async (ok) => {
-            pendingAction = null;
-            if (ok) {
-              resolveFailures = 0;
-              // Cache the result for past-round lookup
-              try {
-                const r = await handleRead("get_round", []);
-                if (r.last_result) roundHistory[roundId] = r.last_result;
-              } catch (e) { console.warn(`[CACHE] Failed to cache round ${roundId}:`, e.message); }
-            } else {
-              resolveFailures++;
-              console.error(`[STATE ERROR] resolve_round #${roundId} failed (${resolveFailures}/3). Status still LOCKED.`);
-              lastActionType = ""; lastActionRound = 0;
-              if (resolveFailures >= 3) {
-                await autoReset(`resolve_round #${roundId} failed 3x`);
-              } else {
-                const delay = Math.min(300, 30 * Math.pow(2, resolveFailures));
-                resolveBackoffUntil = Math.floor(Date.now() / 1000) + delay;
-                console.error(`[CRON]   Backoff ${delay}s before retry`);
-              }
-            }
-          });
-        }
-        return;
+      const marketsRaw = await handleRead("get_all_markets", []);
+      const markets = JSON.parse(marketsRaw);
+      for (const [symbol, market] of Object.entries(markets)) {
+        await sweepMarket(symbol, market);
       }
     } catch (e) {
-      console.error(`[CRON] Error: ${e.message}`);
+      console.error(`[KEEPER] loop error: ${e.message}`);
     } finally {
       inFlight = false;
     }
-  }, 5000);
+  }, KEEPER_INTERVAL_MS);
 }
 
 server.listen(PORT, () => {
-  console.log(`🔌 Backend proxy running at http://localhost:${PORT}`);
-  console.log(`   Account: ${account.address}`);
-  console.log(`   Contract: ${CONTRACT_ADDRESS}`);
-  console.log(`   Auto-round cron started (5s interval)`);
-  startCron();
+  console.log(`🔌 GenPerp backend proxy running at http://localhost:${PORT}`);
+  console.log(`   Account:  ${account.address}`);
+  console.log(`   Contract: ${CONTRACT_ADDRESS || "(not set)"}`);
+  console.log(`   Keeper interval: ${KEEPER_INTERVAL_MS}ms`);
+  startKeeper();
 });
-
