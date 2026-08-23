@@ -1,10 +1,18 @@
-# 📈 GenPerp
+# 📈 GenPredict
 
-A **multi-asset leveraged perpetual-futures exchange** built on **GenLayer** — the AI-powered blockchain.
+Two crypto trading products on **GenLayer** — the AI-powered blockchain — sharing one frontend and one price engine:
 
-GenPerp lets anyone open a leveraged **LONG** or **SHORT** on BTC, ETH, or SOL (or any market the admin registers), against a shared on-chain vault, with live PnL, permissionless liquidations, and real long/short funding payments — all powered by GenLayer's **Intelligent Contracts** and **Equivalence Principle**, with **no Chainlink or third-party oracle**.
+- **GenPredict** (main) — short-horizon **up or down** prediction markets. Pick a coin and a horizon (5m, 15m), back UP or DOWN, and winners split the pool. Parimutuel, like PancakeSwap Prediction, with a market list modelled on Polymarket.
+- **GenPerp** — a multi-asset **leveraged perpetual-futures** exchange with live PnL, permissionless liquidations, and long/short funding.
 
-> This repo previously hosted **Gen Predict**, a simple BTC Up/Down prediction round. That contract (`contracts/btc_updown_market.py`) is kept for reference under [Legacy](#-legacy-gen-predict), but GenPerp is now the primary project.
+Both fetch prices with GenLayer's **Intelligent Contracts** and **Equivalence Principle** — **no Chainlink, no oracle, no admin price input**.
+
+| Page | What it is |
+|---|---|
+| `index.html` | Market list — filter by horizon and coin, live countdowns and odds |
+| `market.html?m=BTC-5m` | One market — LIVE/NEXT round cards, chart, betting panel, results |
+| `portfolio.html` | Every bet you've made, P&L, and one-click collect |
+| `perp.html` | The leveraged perp terminal |
 
 ---
 
@@ -14,7 +22,32 @@ GenLayer's whole pitch is *"no oracles, no intermediaries."* Every price-depende
 
 The contract tries **Binance → CoinGecko → Coinbase** in order. One source is not survivable: every validator fetches independently, so under load some get rate-limited — and a throttled CoinGecko request answers `200` with an error body, which reverted trades outright before the fallback chain existed. Because the leader and a validator can land on different exchanges, the agreement band is **0.5%** rather than the 0.2% a single source needs. Measured live, the three sources sit within ~0.02% of each other across BTC/ETH/SOL — comfortably inside the band, and still far tighter than any move that would matter for margin.
 
-## 🎮 How It Works
+## 🔮 How GenPredict works
+
+A market is one (asset, horizon) pair — `BTC-5m`, `ETH-15m`. Each runs a continuous chain of rounds, with **two active at once** so there is never dead time:
+
+```text
+NEXT  (OPEN)   ── accepting bets, no price fixed yet
+LIVE  (LOCKED) ── lock price fixed, counting down to settlement
+
+start ──betting window──▶ lock ──horizon──▶ close
+      bets accepted       lock_price       close_price
+```
+
+The moment a round locks, the following round opens for betting — so you can always place the next bet while the current one plays out. UP wins if `close > lock`, DOWN if `close < lock`.
+
+**Payouts are parimutuel.** The whole pool minus a 3% fee is split across the winning side in proportion to stake, so the multiplier is only final once betting closes and moves as pools fill — exactly like PancakeSwap Prediction. The UI shows a live estimate and says plainly that it is an estimate.
+
+**Rounds are refunded in full, with no fee, when there is no real contest**: an exact price tie, or one side attracting no bets at all. That second case matters — with an empty losing side there is no counterparty to win from, so charging a fee would take money for nothing; with an empty *winning* side nobody could ever claim, which would strand the pool in the contract permanently.
+
+### UX decisions worth keeping
+
+- **Betting closes early, on purpose.** GenLayer needs roughly a minute to reach consensus, so the UI stops accepting bets `CONSENSUS_BUFFER_SECONDS` (45s) before the lock and says why. Letting someone pay gas for a bet that cannot land is worse than telling them no.
+- **The badge and the numbers always describe the same round.** While betting is open a card shows the next round; once it closes the card switches to the live round, whose pool is the money actually at stake. Showing "LIVE" above an empty next-round pool reads as broken.
+- **Multipliers live on the UP/DOWN buttons**, the way PancakeSwap does it, so the risk/reward is visible at the moment of choosing rather than one screen later.
+- **The stake field never loses focus.** Countdowns tick every second, but the panel only rebuilds when its structure changes — otherwise typing an amount would reset the caret each second.
+
+## 🎮 How GenPerp works
 
 ```text
 open_position(symbol, LONG|SHORT, leverage)  ──▶  margin posted, live entry price fetched,
@@ -49,6 +82,16 @@ Nothing is hardcoded to BTC or to one round length. The owner can register or up
 
 BTC, ETH, and SOL ship pre-registered; add more with `add_market(...)`.
 
+## 🐛 Bugs the smoke tests caught
+
+Each of these was found by running the thing on-chain, not by reading the code:
+
+1. **Stranded funds on a one-sided round.** If everyone backed UP and DOWN won, the winning pool was zero: nobody could claim, no fee was taken, and the entire pool sat in the contract permanently. Rounds with an empty side (or an exact price tie) now settle as `VOID` and refund every stake in full. Proven live — a 1 GEN bet on UP lost on direction, and was refunded because no one took the other side.
+2. **A multiplier that could never be paid.** While one side was empty the card advertised `0.97x`, derived from the parimutuel formula with the fee applied. The round would actually refund at `1.00x`. The contract now reports the honest figure and the betting panel explains that a round with no counterparty is void.
+3. **A keeper that could wedge itself forever.** Sweeps were serialised to avoid double-sending, but RPC calls had no timeout — so a single hung request stalled every market permanently. It happened during a network blip and rounds stopped advancing. All keeper calls are now bounded, with an overrun escape hatch.
+4. **Hidden in-flight rounds.** Because the horizon outlasts the betting window, two rounds are normally locked at once, but the contract only tracked the most recent — hiding a round the user had money in. `get_market_detail` now returns every locked round.
+5. **A card that contradicted itself.** A market showing `LIVE` alongside an empty pool reads as broken: the badge described the live round while the numbers came from the next one. Badge and numbers now always describe the same round.
+
 ## ⚠️ GenVM gotchas found the hard way
 
 Three constraints cost real deploys while building this — they are enforced by GenVM but not spelled out in the docs:
@@ -66,23 +109,41 @@ npm run deploy
 
 ```text
 ├── contracts/
-│   ├── perp_exchange.py        # GenPerp Intelligent Contract (current)
-│   ├── btc_updown_market.py    # Legacy Gen Predict contract
+│   ├── predict_market.py       # GenPredict — parimutuel up/down markets
+│   ├── perp_exchange.py        # GenPerp — leveraged perpetuals
+│   ├── btc_updown_market.py    # Legacy single-asset prediction round
 │   └── btc_prediction.py       # Legacy example IC with consensus tolerance
 ├── frontend/
-│   ├── index.html              # Trading terminal UI (Tailwind CSS)
-│   └── app.js                  # Frontend logic (GenLayer JS SDK)
+│   ├── index.html / home.js    # Market list
+│   ├── market.html / market.js # One market: rounds, chart, betting
+│   ├── portfolio.html / .js    # Your bets across all markets
+│   ├── perp.html / perp-app.js # Leveraged perp terminal
+│   ├── shared.js               # Wallet, config, formatting, toasts
+│   └── styles.css              # Design system
 ├── deploy/
+│   ├── deployPredictScript.ts  # Deploys predict_market.py
 │   ├── deployPerpScript.ts     # Deploys perp_exchange.py
 │   └── deployScript.ts         # Legacy deploy script
 ├── scripts/
-│   ├── backend-proxy.js        # Read proxy + keeper bot (Render web service)
-│   ├── perp-keeper.ts          # Standalone keeper (price refresh/liquidate/funding)
-│   ├── perp-smoke-test.ts      # End-to-end lifecycle test against a live node
-│   ├── fund-vault.ts           # One-off vault funding helper
+│   ├── backend-proxy.js        # Read proxy + both keepers (Render web service)
+│   ├── predict-keeper.js       # Round lifecycle: start / lock / resolve
+│   ├── predict-smoke-test.ts   # End-to-end bet → settle → claim test
+│   ├── perp-keeper.ts          # Price refresh / liquidations / funding
+│   ├── perp-smoke-test.ts      # End-to-end perp lifecycle test
+│   ├── fund-vault.ts           # One-off perp vault funding helper
 │   └── build.js                # Injects BACKEND_URL into frontend at build time
 ├── vercel.json                 # Vercel deployment configuration
 └── package.json
+```
+
+### Commands
+
+```bash
+npm run deploy        # deploy predict_market.py (validates in GenVM first)
+npm run deploy:perp   # deploy perp_exchange.py
+npm run backend       # read proxy + both keepers on :3005
+npm run smoke         # end-to-end predict test (bet → settle → claim)
+npm run smoke:perp    # end-to-end perp test
 ```
 
 ## 🚀 Deployment Guide

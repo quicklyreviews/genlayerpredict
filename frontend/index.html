@@ -1,201 +1,64 @@
 <!DOCTYPE html>
-<html lang="en"><head>
+<html lang="en">
+<head>
 <meta charset="utf-8"/>
-<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-<title>GenPerp — Leveraged Perpetuals on GenLayer</title>
-<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet"/>
-<style>
-  body { font-family: 'Inter', sans-serif; background-color: #000; color: #fff; -webkit-font-smoothing: antialiased; }
-  .mono { font-family: 'JetBrains Mono', monospace; }
-  .btn-connect { position: relative; background: transparent; border: 1px solid #fff; padding: 8px 20px; clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px)); transition: all .2s; }
-  .btn-connect:hover { background: rgba(255,255,255,.1); }
-  .panel-border { border: 1px solid #262626; }
-  .btn-long { background:#0d3321; color:#4ade80; border:1px solid rgba(74,222,128,.35); font-weight:700; transition: all .15s; }
-  .btn-long:hover { background:#124329; box-shadow:0 0 24px rgba(74,222,128,.25); }
-  .btn-long:disabled { opacity:.35; cursor:not-allowed; box-shadow:none; }
-  .btn-short { background:#3a1418; color:#f87171; border:1px solid rgba(248,113,113,.35); font-weight:700; transition: all .15s; }
-  .btn-short:hover { background:#4a1a1f; box-shadow:0 0 24px rgba(248,113,113,.25); }
-  .btn-short:disabled { opacity:.35; cursor:not-allowed; box-shadow:none; }
-  .tab-market { padding:8px 16px; border-radius:8px; font-size:13px; font-weight:600; color:#8a8a8a; cursor:pointer; border:1px solid transparent; white-space:nowrap; }
-  .tab-market.active { background:#151515; color:#fff; border-color:#333; }
-  .tab-market:hover:not(.active) { color:#ddd; }
-  ::-webkit-scrollbar { width:6px; height:6px; }
-  ::-webkit-scrollbar-track { background:#000; }
-  ::-webkit-scrollbar-thumb { background:#333; border-radius:10px; }
-  input[type=range] { -webkit-appearance:none; height:4px; border-radius:2px; background:#262626; }
-  input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:16px; height:16px; border-radius:50%; background:#fff; cursor:pointer; margin-top:-6px; }
-  .hidden { display:none !important; }
-  .pill { font-size:10px; text-transform:uppercase; letter-spacing:.5px; padding:2px 8px; border-radius:999px; font-weight:700; }
-</style>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>GenPredict — Will it be up or down?</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="styles.css"/>
 </head>
-<body class="min-h-screen p-4">
+<body>
 
-<header class="max-w-7xl mx-auto flex items-center justify-between mb-6 px-2">
-  <div class="flex items-center gap-2">
-    <img class="w-8 h-8" src="https://assets.zksync.io/images/genlayer_white.svg" alt="GenPerp"/>
-    <span class="text-2xl font-bold tracking-tight">GenPerp</span>
-    <span class="pill bg-purple-900/40 text-purple-300 border border-purple-700/40 ml-1">Intelligent Contracts</span>
+<header class="header" data-app-header></header>
+
+<main class="page">
+  <div class="page__head">
+    <h1 class="page__title">Will it be up or down?</h1>
+    <p class="page__sub">
+      Back UP or DOWN on a coin's price over a fixed horizon. Winners split the whole pool.
+      Prices are fetched and agreed on-chain by GenLayer validators — no oracle.
+    </p>
   </div>
-  <div class="flex items-center gap-3">
-    <span id="wallet-balance" class="text-xs mono text-green-400 hidden">0 GEN</span>
-    <span id="connection-label" class="text-xs text-gray-400 hidden">Disconnected</span>
-    <button id="btn-fund" class="btn-connect text-sm text-yellow-400 border-yellow-400" onclick="fundVault()">Fund Vault</button>
-    <button id="btn-connect" class="btn-connect text-sm" onclick="connectWallet()">Connect Wallet</button>
-    <button class="text-gray-500 hover:text-white text-sm" onclick="openConfig()">⚙</button>
+
+  <div class="filters">
+    <div class="chips" id="horizon-chips" role="tablist" aria-label="Horizon"></div>
+    <div class="chips" id="asset-chips" role="tablist" aria-label="Asset"></div>
   </div>
-</header>
 
-<!-- Market tabs -->
-<div class="max-w-7xl mx-auto flex items-center gap-2 overflow-x-auto pb-3 px-2" id="market-tabs"></div>
+  <div class="section-head">
+    <h2 id="list-heading">Open markets</h2>
+    <p id="list-note"></p>
+  </div>
 
-<main class="max-w-7xl mx-auto">
-<div class="grid grid-cols-1 lg:grid-cols-12 gap-4">
+  <div class="grid" id="market-grid">
+    <div class="skel skel-card"></div>
+    <div class="skel skel-card"></div>
+    <div class="skel skel-card"></div>
+  </div>
 
-  <!-- Chart -->
-  <section class="lg:col-span-8 panel-border bg-[#0a0a0a] flex flex-col min-h-[320px] lg:min-h-[480px]">
-    <div class="flex items-center justify-between border-b border-[#2a2a2a] p-2 text-xs text-gray-400">
-      <div class="flex items-center gap-4">
-        <span id="chart-title" class="flex items-center gap-1 font-bold text-gray-200">BTC/USDT</span>
-        <span id="vault-badge" class="px-2 py-0.5 rounded text-[10px] bg-gray-800 text-gray-300">Vault —</span>
-      </div>
-      <div class="flex items-center gap-3">
-        <span id="mark-price" class="mono text-gray-200">—</span>
+  <div id="claims-section" class="hidden">
+    <div class="section-head">
+      <h2>Ready to collect</h2>
+      <p>Rounds you won</p>
+    </div>
+    <div class="table-wrap">
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Market</th><th>Round</th><th class="t-center">Your pick</th>
+              <th class="t-center">Staked</th><th class="t-center">Result</th>
+              <th class="t-right">Payout</th><th class="t-right"></th>
+            </tr>
+          </thead>
+          <tbody id="claims-body"></tbody>
+        </table>
       </div>
     </div>
-    <div class="flex flex-1 relative overflow-hidden">
-      <div class="flex-1 relative"><iframe id="tradingview-chart" class="w-full h-full border-0" src="about:blank"></iframe></div>
-    </div>
-    <div class="flex items-center justify-between border-t border-[#2a2a2a] p-2 text-[10px] text-gray-500">
-      <span>No oracle — price fetched on-chain via GenLayer's Equivalence Principle (Binance → CoinGecko → Coinbase, 0.5% consensus band)</span>
-      <span id="funding-badge" class="mono">funding —</span>
-    </div>
-  </section>
-
-  <!-- Trade panel -->
-  <section class="lg:col-span-4 panel-border bg-[#0a0a0a] p-6 flex flex-col">
-    <h2 class="text-gray-400 text-sm mb-5 border-b border-[#2a2a2a] pb-2">Open Position</h2>
-
-    <div class="space-y-5">
-      <div>
-        <label class="block text-xs text-gray-500 mb-1">Margin (GEN)</label>
-        <div class="flex items-center border border-[#333] bg-[#121212] rounded overflow-hidden">
-          <input id="margin-amount" class="bg-transparent border-none focus:ring-0 text-sm flex-1 px-4 py-3" type="number" min="0.001" step="0.01" value="1"/>
-          <button class="px-4 py-3 border-l border-[#333] hover:bg-[#1a1a1a]" onclick="document.getElementById('margin-amount').stepUp()">+</button>
-          <button class="px-4 py-3 border-l border-[#333] hover:bg-[#1a1a1a]" onclick="document.getElementById('margin-amount').stepDown()">-</button>
-        </div>
-        <p id="min-margin-hint" class="text-[11px] text-gray-600 mt-1"></p>
-      </div>
-
-      <div>
-        <div class="flex justify-between text-xs text-gray-500 mb-1">
-          <span>Leverage</span>
-          <span id="leverage-value" class="text-white font-semibold mono">5x</span>
-        </div>
-        <input id="leverage-slider" type="range" min="1" max="20" value="5" class="w-full" oninput="onLeverageChange()"/>
-      </div>
-
-      <div class="grid grid-cols-2 gap-3 pt-1">
-        <button id="btn-long" class="btn-long w-full py-4 text-sm uppercase tracking-widest rounded" onclick="openPosition('LONG')">Long ▲</button>
-        <button id="btn-short" class="btn-short w-full py-4 text-sm uppercase tracking-widest rounded" onclick="openPosition('SHORT')">Short ▼</button>
-      </div>
-      <p id="trade-feedback" class="text-xs text-center text-gray-400 min-h-[16px]"></p>
-
-      <div class="pt-3 border-t border-[#1a1a1a] space-y-2 text-sm">
-        <div class="flex justify-between"><span class="text-gray-500">Notional</span><span id="preview-notional" class="text-white mono">—</span></div>
-        <div class="flex justify-between"><span class="text-gray-500">Fee</span><span id="preview-fee" class="text-white mono">—</span></div>
-        <div class="flex justify-between"><span class="text-gray-500">Est. liq. price</span><span id="preview-liq" class="text-white mono">—</span></div>
-        <div class="flex justify-between"><span class="text-gray-500">Max leverage</span><span id="preview-maxlev" class="text-white mono">—</span></div>
-      </div>
-    </div>
-  </section>
-</div>
-
-<!-- Vault status -->
-<section class="mt-4 grid grid-cols-2 md:grid-cols-4 gap-3">
-  <div class="panel-border bg-[#0a0a0a] p-4 text-center">
-    <div class="text-[11px] text-gray-500 uppercase tracking-wide">Vault Balance</div>
-    <div id="vault-balance" class="text-lg font-bold mono mt-1">—</div>
   </div>
-  <div class="panel-border bg-[#0a0a0a] p-4 text-center">
-    <div class="text-[11px] text-gray-500 uppercase tracking-wide">Free Balance</div>
-    <div id="vault-free" class="text-lg font-bold mono mt-1">—</div>
-  </div>
-  <div class="panel-border bg-[#0a0a0a] p-4 text-center">
-    <div class="text-[11px] text-gray-500 uppercase tracking-wide">Open Interest (L/S)</div>
-    <div id="vault-oi" class="text-lg font-bold mono mt-1">—</div>
-  </div>
-  <div class="panel-border bg-[#0a0a0a] p-4 text-center">
-    <div class="text-[11px] text-gray-500 uppercase tracking-wide">Total Positions</div>
-    <div id="vault-positions" class="text-lg font-bold mono mt-1">—</div>
-  </div>
-</section>
-
-<!-- Positions table -->
-<section class="mt-4 bg-[#0a0a0a] overflow-hidden panel-border">
-  <div class="p-4 border-b border-[#2a2a2a] flex items-center justify-between">
-    <h3 class="text-sm font-medium text-gray-200">Your Positions</h3>
-    <span id="positions-stats" class="text-xs text-gray-500"></span>
-  </div>
-  <div class="overflow-x-auto">
-    <table class="w-full text-left text-xs text-gray-400">
-      <thead>
-        <tr class="border-b border-[#1a1a1a] text-gray-500 uppercase tracking-tighter">
-          <th class="px-4 py-3 font-normal">ID</th>
-          <th class="px-4 py-3 font-normal">Market</th>
-          <th class="px-4 py-3 font-normal text-center">Side</th>
-          <th class="px-4 py-3 font-normal text-center">Lev</th>
-          <th class="px-4 py-3 font-normal text-center">Margin</th>
-          <th class="px-4 py-3 font-normal text-center">Entry</th>
-          <th class="px-4 py-3 font-normal text-center">Liq. Est.</th>
-          <th class="px-4 py-3 font-normal text-center">PnL / ROI</th>
-          <th class="px-4 py-3 font-normal text-center">Status</th>
-          <th class="px-4 py-3 font-normal text-right">Action</th>
-        </tr>
-      </thead>
-      <tbody id="positions-body" class="divide-y divide-[#1a1a1a]">
-        <tr><td colspan="10" class="px-4 py-8 text-center text-gray-600">Connect wallet to see your positions</td></tr>
-      </tbody>
-    </table>
-  </div>
-</section>
-
-<!-- Activity log -->
-<section class="mt-4 panel-border bg-[#0a0a0a] p-4">
-  <h3 class="text-sm font-medium text-gray-200 mb-2">Activity</h3>
-  <div id="activity-log" class="max-h-40 overflow-y-auto text-xs mono text-gray-500 space-y-1">
-    <div class="log-empty text-center text-gray-700 py-4">No activity yet</div>
-  </div>
-</section>
-
 </main>
-
-<footer class="max-w-7xl mx-auto mt-8 py-6 border-t border-[#1a1a1a] text-center text-xs text-gray-500">
-  GenPerp — a multi-asset leveraged perpetual exchange built on <a href="https://www.genlayer.com" target="_blank" class="text-gray-300 hover:text-white">GenLayer</a> Intelligent Contracts.
-  Created by <a href="https://x.com/trungkts29" target="_blank" rel="noopener noreferrer" class="text-gray-300 hover:text-white font-medium">@trungkts29</a>
-</footer>
-
-<!-- Config modal -->
-<div id="config-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center">
-  <div class="absolute inset-0 bg-black/70" onclick="closeConfig()"></div>
-  <div class="relative bg-[#0a0a0a] panel-border rounded p-6 w-[90%] max-w-md">
-    <h2 class="text-lg font-bold mb-4">Configuration</h2>
-    <div class="space-y-3">
-      <div>
-        <label class="block text-xs text-gray-500 mb-1 uppercase">Backend URL</label>
-        <input id="input-rpc" class="w-full bg-[#121212] border border-[#333] rounded px-3 py-2 text-sm mono"/>
-      </div>
-      <div>
-        <label class="block text-xs text-gray-500 mb-1 uppercase">Contract Address</label>
-        <input id="input-contract" class="w-full bg-[#121212] border border-[#333] rounded px-3 py-2 text-sm mono"/>
-      </div>
-    </div>
-    <div class="flex gap-2 justify-end mt-5">
-      <button class="btn-connect text-sm" onclick="closeConfig()">Cancel</button>
-      <button class="btn-connect text-sm border-green-500 text-green-400" onclick="saveConfig()">Save & Reconnect</button>
-    </div>
-  </div>
-</div>
 
 <script type="importmap">
 {
@@ -206,5 +69,6 @@
   }
 }
 </script>
-<script type="module" src="app.js?v=1"></script>
-</body></html>
+<script type="module" src="home.js"></script>
+</body>
+</html>

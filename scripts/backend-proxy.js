@@ -23,9 +23,13 @@ function loadEnv() {
 }
 loadEnv();
 
+const { PredictKeeper } = require("./predict-keeper");
+
 const PORT = process.env.PORT || 3005;
 const RPC_URL = process.env.GENLAYER_RPC_URL || "https://studio.genlayer.com/api";
 const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS || "";
+const PREDICT_ADDRESS = process.env.PREDICT_CONTRACT_ADDRESS || "";
+const PREDICT_KEEPER_INTERVAL_MS = parseInt(process.env.PREDICT_KEEPER_INTERVAL_MS || "20000", 10);
 // Each sweep sends one touch_price transaction per market (plus any liquidations),
 // so this interval is a direct gas cost. 60s keeps mark prices fresh enough for
 // liquidation detection without burning gas on a 3-market loop.
@@ -79,15 +83,15 @@ const READ_TTL_MS = parseInt(process.env.READ_TTL_MS || "10000", 10);
 const LONG_TTL_METHODS = new Set(["get_all_markets", "get_market", "get_owner"]);
 const LONG_TTL_MS = 120000;
 
-async function handleRead(method, args, { allowStale = true } = {}) {
-  const cacheKey = method + JSON.stringify(args || []);
+async function handleRead(method, args, { allowStale = true, address = CONTRACT_ADDRESS } = {}) {
+  const cacheKey = address + ":" + method + JSON.stringify(args || []);
   const ttl = LONG_TTL_METHODS.has(method) ? LONG_TTL_MS : READ_TTL_MS;
   const hit = readCache[cacheKey];
   if (hit && Date.now() - hit.ts < ttl) return hit.value;
 
   try {
     const result = await withTimeout(
-      client.readContract({ address: CONTRACT_ADDRESS, functionName: method, args: args || [] }),
+      client.readContract({ address, functionName: method, args: args || [] }),
       25000
     );
     readCache[cacheKey] = { value: result, ts: Date.now() };
@@ -95,6 +99,32 @@ async function handleRead(method, args, { allowStale = true } = {}) {
   } catch (e) {
     if (allowStale && hit !== undefined) {
       console.warn(`[RPC] ${method} failed (${e.message}), serving stale cache`);
+      return hit.value;
+    }
+    throw e;
+  }
+}
+
+// Prediction rounds change on a timer, so a long TTL would show a stale countdown
+// or a stale pool. Kept short; the cache still collapses concurrent tabs into one call.
+const PREDICT_TTL_MS = parseInt(process.env.PREDICT_TTL_MS || "5000", 10);
+
+async function handlePredictRead(method, args) {
+  if (!PREDICT_ADDRESS) throw new Error("PREDICT_CONTRACT_ADDRESS is not configured");
+  const cacheKey = "predict:" + method + JSON.stringify(args || []);
+  const hit = readCache[cacheKey];
+  const ttl = method === "get_all_markets" ? LONG_TTL_MS : PREDICT_TTL_MS;
+  if (hit && Date.now() - hit.ts < ttl) return hit.value;
+  try {
+    const result = await withTimeout(
+      client.readContract({ address: PREDICT_ADDRESS, functionName: method, args: args || [] }),
+      25000
+    );
+    readCache[cacheKey] = { value: result, ts: Date.now() };
+    return result;
+  } catch (e) {
+    if (hit !== undefined) {
+      console.warn(`[RPC] predict.${method} failed (${e.message}), serving stale cache`);
       return hit.value;
     }
     throw e;
@@ -127,7 +157,26 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
 
   if (req.method === "GET" && url.pathname === "/api/config") {
-    json(res, { contractAddress: CONTRACT_ADDRESS });
+    json(res, { contractAddress: CONTRACT_ADDRESS, predictAddress: PREDICT_ADDRESS });
+    return;
+  }
+
+  // Prediction market reads. Writes are deliberately absent: bets and claims move
+  // the user's own funds and must be signed by their wallet, never by this key.
+  if (req.method === "POST" && url.pathname === "/api/predict/call") {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", async () => {
+      try {
+        const { method, args, type } = JSON.parse(body);
+        if (type === "write") {
+          throw new Error(`Predict writes must be signed by your own wallet, not the backend`);
+        }
+        json(res, await handlePredictRead(method, args));
+      } catch (e) {
+        json(res, { error: e.message }, 500);
+      }
+    });
     return;
   }
 
@@ -248,9 +297,20 @@ async function startKeeper() {
 }
 
 server.listen(PORT, () => {
-  console.log(`🔌 GenPerp backend proxy running at http://localhost:${PORT}`);
+  console.log(`🔌 GenPredict backend running at http://localhost:${PORT}`);
   console.log(`   Account:  ${account.address}`);
-  console.log(`   Contract: ${CONTRACT_ADDRESS || "(not set)"}`);
-  console.log(`   Keeper interval: ${KEEPER_INTERVAL_MS}ms`);
+  console.log(`   Predict:  ${PREDICT_ADDRESS || "(not set)"}`);
+  console.log(`   Perp:     ${CONTRACT_ADDRESS || "(not set)"}`);
   startKeeper();
+
+  if (PREDICT_ADDRESS) {
+    const predictKeeper = new PredictKeeper({
+      rpcUrl: RPC_URL,
+      privateKey: rawPk,
+      contractAddress: PREDICT_ADDRESS,
+    });
+    predictKeeper.start(PREDICT_KEEPER_INTERVAL_MS);
+  } else {
+    console.warn("[PREDICT] PREDICT_CONTRACT_ADDRESS not set — prediction rounds will not advance");
+  }
 });

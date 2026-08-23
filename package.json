@@ -9,9 +9,13 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "build": "node scripts/build.js",
-    "deploy": "tsx deploy/deployPerpScript.ts",
+    "deploy": "tsx deploy/deployPredictScript.ts",
+    "deploy:perp": "tsx deploy/deployPerpScript.ts",
+    "smoke": "tsx scripts/predict-smoke-test.ts",
+    "smoke:perp": "tsx scripts/perp-smoke-test.ts",
     "fund-vault": "tsx scripts/fund-vault.ts",
-    "keeper": "tsx scripts/perp-keeper.ts",
+    "keeper": "node scripts/predict-keeper.js",
+    "keeper:perp": "tsx scripts/perp-keeper.ts",
     "backend": "node scripts/backend-proxy.js"
   },
   "keywords": [],

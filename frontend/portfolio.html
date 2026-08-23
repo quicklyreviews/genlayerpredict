@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Portfolio — GenPredict</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="styles.css"/>
+</head>
+<body>
+
+<header class="header" data-app-header></header>
+
+<main class="page">
+  <div class="page__head">
+    <h1 class="page__title">Your portfolio</h1>
+    <p class="page__sub">Every prediction you've made, across all markets.</p>
+  </div>
+
+  <div class="grid" id="summary" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));margin-bottom:22px"></div>
+
+  <div class="section-head">
+    <h2>Bet history</h2>
+    <p id="hist-note"></p>
+  </div>
+
+  <div class="table-wrap">
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Market</th><th>Round</th><th class="t-center">Pick</th>
+            <th class="t-center">Stake</th><th class="t-center">Lock → Close</th>
+            <th class="t-center">Result</th><th class="t-center">Status</th>
+            <th class="t-right">Payout</th>
+          </tr>
+        </thead>
+        <tbody id="pf-body">
+          <tr><td colspan="8" class="empty">Connect your wallet to see your bets</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<script type="importmap">
+{
+  "imports": {
+    "genlayer-js": "https://esm.sh/genlayer-js@1.1.8",
+    "genlayer-js/chains": "https://esm.sh/genlayer-js@1.1.8/chains",
+    "genlayer-js/types": "https://esm.sh/genlayer-js@1.1.8/types"
+  }
+}
+</script>
+<script type="module" src="portfolio.js"></script>
+</body>
+</html>

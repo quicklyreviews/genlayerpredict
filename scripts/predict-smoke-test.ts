@@ -1,0 +1,186 @@
+/**
+ * End-to-end smoke test for the GenPredict PredictMarket contract.
+ *
+ * Places a real bet on both sides of the same round from one wallet is impossible
+ * by design (one bet per wallet per round), so this test verifies the single-bet
+ * path end to end: bet → wait for the round to lock → wait for it to resolve →
+ * claim, and checks the payout maths against the parimutuel formula.
+ *
+ * Because a lone bettor makes the round one-sided, it settles as VOID and refunds
+ * in full — which is exactly the stranded-funds case worth proving works.
+ *
+ * Usage:
+ *   npx tsx scripts/predict-smoke-test.ts [marketKey] [stakeGen] [side]
+ *   npx tsx scripts/predict-smoke-test.ts BTC-5m 1 UP
+ *
+ * NOTE: spends real balance on whatever network GENLAYER_RPC_URL points at, and
+ * takes several minutes because it waits for a full round to settle.
+ */
+import { createClient } from "genlayer-js";
+import { privateKeyToAccount } from "viem/accounts";
+import { localnet } from "genlayer-js/chains";
+import * as fs from "fs";
+import * as path from "path";
+
+function loadEnv() {
+  const p = path.join(__dirname, "..", ".env");
+  if (!fs.existsSync(p)) return;
+  for (const line of fs.readFileSync(p, "utf-8").split("\n")) {
+    const t = line.trim();
+    if (!t || t.startsWith("#")) continue;
+    const i = t.indexOf("=");
+    if (i === -1) continue;
+    process.env[t.slice(0, i).trim()] = t.slice(i + 1).trim();
+  }
+}
+loadEnv();
+
+const A = process.env.PREDICT_CONTRACT_ADDRESS!;
+const RPC = process.env.GENLAYER_RPC_URL || "https://studio.genlayer.com/api";
+if (!A) { console.error("PREDICT_CONTRACT_ADDRESS not set"); process.exit(1); }
+
+const rawPk = process.env.PRIVATE_KEY || "";
+const account = privateKeyToAccount((rawPk.startsWith("0x") ? rawPk : `0x${rawPk}`) as `0x${string}`);
+const client = createClient({ chain: { ...localnet, id: 61999 } as any, endpoint: RPC, account });
+
+const MARKET = process.argv[2] || "BTC-5m";
+const STAKE_GEN = parseFloat(process.argv[3] || "1");
+const SIDE = (process.argv[4] || "UP").toUpperCase();
+
+const TX_STATUS = [
+  "UNINITIALIZED", "PENDING", "PROPOSING", "COMMITTING", "REVEALING", "ACCEPTED",
+  "UNDETERMINED", "FINALIZED", "CANCELED", "APPEAL_REVEALING", "APPEAL_COMMITTING",
+  "READY_TO_FINALIZE", "VALIDATORS_TIMEOUT", "LEADER_TIMEOUT",
+];
+const OK = new Set(["ACCEPTED", "FINALIZED"]);
+const BAD = new Set(["UNDETERMINED", "CANCELED", "VALIDATORS_TIMEOUT", "LEADER_TIMEOUT"]);
+
+const gen = (wei: string | bigint) => (Number(BigInt(wei)) / 1e18).toFixed(6);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function read(fn: string, args: any[] = []) {
+  return client.readContract({ address: A, functionName: fn, args } as any);
+}
+
+async function write(fn: string, args: any[] = [], valueWei = 0n) {
+  const hash = await client.writeContract({ address: A, functionName: fn, args, value: valueWei } as any);
+  process.stdout.write(`   tx ${hash.slice(0, 12)}… `);
+  for (let i = 0; i < 90; i++) {
+    await sleep(5000);
+    const tx: any = await client.getTransaction({ hash });
+    const cd = tx.consensus_data;
+    const lr = Array.isArray(cd?.leader_receipt) ? cd.leader_receipt[0] : cd?.leader_receipt;
+    if (lr?.execution_result === "ERROR") {
+      const trace = lr.genvm_result?.stderr || "";
+      const tail = trace.trim().split("\n").filter(Boolean).slice(-2).join(" | ");
+      throw new Error(`${fn}() reverted: ${JSON.stringify(lr.result?.payload ?? lr.result)} ${tail}`);
+    }
+    const name = typeof tx.status === "number" ? TX_STATUS[tx.status] ?? String(tx.status) : String(tx.status);
+    if (BAD.has(name)) throw new Error(`${fn}() ended ${name}`);
+    if (OK.has(name)) { process.stdout.write(`✅ ${name}\n`); return lr; }
+  }
+  throw new Error(`${fn}() never reached consensus`);
+}
+
+async function detail() {
+  return JSON.parse((await read("get_market_detail", [MARKET, 5])) as any);
+}
+
+async function main() {
+  console.log("🧪 GenPredict smoke test");
+  console.log(`   Contract: ${A}`);
+  console.log(`   Account:  ${account.address}`);
+  console.log(`   Bet:      ${STAKE_GEN} GEN on ${SIDE} in ${MARKET}\n`);
+
+  console.log("1️⃣  Market config");
+  const d0 = await detail();
+  if (d0.error) throw new Error(`market ${MARKET} not found`);
+  console.log("   ", JSON.stringify(d0.market));
+
+  console.log("\n2️⃣  Waiting for a round with enough betting time left");
+  let target = null;
+  for (let i = 0; i < 60; i++) {
+    const d = await detail();
+    const r = d.next_round;
+    const left = r ? r.lock_ts - Math.floor(Date.now() / 1000) : -1;
+    if (r && r.status === "OPEN" && left > 75) { target = r; break; }
+    console.log(`   waiting… next=${r ? `#${r.id} lock in ${left}s` : "none"}`);
+    await sleep(10000);
+  }
+  if (!target) throw new Error("No round opened with enough betting time");
+  console.log(`   ✅ round #${target.id}, ${target.lock_ts - Math.floor(Date.now() / 1000)}s before lock`);
+
+  console.log("\n3️⃣  Placing the bet");
+  await write("bet", [MARKET, SIDE], BigInt(Math.round(STAKE_GEN * 1e18)));
+  const afterBet = await detail();
+  const rNow = [afterBet.next_round, afterBet.live_round].find((r: any) => r && r.id === target.id);
+  console.log(`   pools → UP ${gen(rNow.up_pool)} / DOWN ${gen(rNow.down_pool)} GEN`);
+  if (BigInt(rNow.total_pool) !== BigInt(Math.round(STAKE_GEN * 1e18))) {
+    throw new Error(`pool mismatch: expected ${STAKE_GEN} GEN, got ${gen(rNow.total_pool)}`);
+  }
+
+  console.log("\n4️⃣  Waiting for the round to lock and settle (several minutes)");
+  let settled = null;
+  for (let i = 0; i < 90; i++) {
+    await sleep(10000);
+    const d = await detail();
+    const hit = (d.history || []).find((r: any) => r.id === target.id);
+    if (hit) { settled = hit; break; }
+    const live = d.live_round && d.live_round.id === target.id ? d.live_round : null;
+    console.log(`   ${live ? `live, settles in ${live.close_ts - Math.floor(Date.now() / 1000)}s` : "waiting for lock…"}`);
+  }
+  if (!settled) throw new Error("Round did not settle in time");
+
+  console.log(`   ✅ settled: lock $${settled.lock_price} → close $${settled.close_price}`);
+  console.log(`      winner ${settled.winner} · settlement ${settled.settlement}`);
+
+  console.log("\n5️⃣  Checking the payout the contract computed");
+  const bets = JSON.parse((await read("get_user_bets", [account.address.toLowerCase(), MARKET])) as any);
+  const mine = bets.find((b: any) => b.round_id === target.id);
+  if (!mine) throw new Error("bet not found in user bets");
+  console.log(`   state=${mine.state} payout=${gen(mine.payout)} GEN staked=${gen(mine.amount)} GEN`);
+
+  // A single bettor makes the round one-sided, so it must void and refund in full.
+  if (settled.settlement !== "VOID") {
+    throw new Error(`expected VOID settlement for a one-sided round, got ${settled.settlement}`);
+  }
+  if (BigInt(mine.payout) !== BigInt(mine.amount)) {
+    throw new Error(`void round must refund the full stake: got ${gen(mine.payout)} vs ${gen(mine.amount)}`);
+  }
+  console.log("   ✅ one-sided round voided and refunds the full stake (no fee taken)");
+
+  console.log("\n6️⃣  Claiming");
+  const before = BigInt((await balance()) as string);
+  await write("claim", [MARKET, target.id]);
+  const after = BigInt((await balance()) as string);
+  console.log(`   wallet delta ${(Number(after - before) / 1e18).toFixed(6)} GEN (incl. gas)`);
+
+  const bets2 = JSON.parse((await read("get_user_bets", [account.address.toLowerCase(), MARKET])) as any);
+  const mine2 = bets2.find((b: any) => b.round_id === target.id);
+  if (mine2.state !== "CLAIMED") throw new Error(`expected CLAIMED, got ${mine2.state}`);
+  console.log("   ✅ marked CLAIMED");
+
+  try {
+    await write("claim", [MARKET, target.id]);
+    throw new Error("double claim should have reverted");
+  } catch (e: any) {
+    if (String(e.message).includes("double claim should")) throw e;
+    console.log("   ✅ double claim correctly rejected");
+  }
+
+  console.log("\n✅ Smoke test passed — bet, settle, refund and claim all work on-chain.");
+}
+
+async function balance(): Promise<string> {
+  const r = await fetch(RPC, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", method: "eth_getBalance", params: [account.address, "latest"], id: 1 }),
+  });
+  return ((await r.json()) as any).result;
+}
+
+main().catch((e) => {
+  console.error("\n❌ Smoke test failed:", e.message ?? e);
+  process.exit(1);
+});
