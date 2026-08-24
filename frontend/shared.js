@@ -25,13 +25,43 @@ export const EXPLORER_URL = "https://explorer-studio.genlayer.com";
 export const CONSENSUS_BUFFER_SECONDS = 45;
 
 export const ASSET_META = {
-  BTC: { name: "Bitcoin", color: "#f7931a", tv: "BINANCE:BTCUSDT", cg: "bitcoin" },
-  ETH: { name: "Ethereum", color: "#627eea", tv: "BINANCE:ETHUSDT", cg: "ethereum" },
-  SOL: { name: "Solana", color: "#14f195", tv: "BINANCE:SOLUSDT", cg: "solana" },
-  XRP: { name: "XRP", color: "#23292f", tv: "BINANCE:XRPUSDT", cg: "ripple" },
-  BNB: { name: "BNB", color: "#f3ba2f", tv: "BINANCE:BNBUSDT", cg: "binancecoin" },
-  DOGE: { name: "Dogecoin", color: "#c2a633", tv: "BINANCE:DOGEUSDT", cg: "dogecoin" },
+  BTC:  { name: "Bitcoin",   color: "#f7931a", tv: "BINANCE:BTCUSDT",  cg: "bitcoin" },
+  ETH:  { name: "Ethereum",  color: "#627eea", tv: "BINANCE:ETHUSDT",  cg: "ethereum" },
+  SOL:  { name: "Solana",    color: "#14f195", tv: "BINANCE:SOLUSDT",  cg: "solana" },
+  XRP:  { name: "XRP",       color: "#23292f", tv: "BINANCE:XRPUSDT",  cg: "ripple" },
+  BNB:  { name: "BNB",       color: "#f3ba2f", tv: "BINANCE:BNBUSDT",  cg: "binancecoin" },
+  LINK: { name: "Chainlink", color: "#2a5ada", tv: "BINANCE:LINKUSDT", cg: "chainlink" },
+  DOGE: { name: "Dogecoin",  color: "#c2a633", tv: "BINANCE:DOGEUSDT", cg: "dogecoin" },
+  SHIB: { name: "Shiba Inu", color: "#f00500", tv: "BINANCE:SHIBUSDT", cg: "shiba-inu" },
+  PEPE: { name: "Pepe",      color: "#3d8130", tv: "BINANCE:PEPEUSDT", cg: "pepe" },
 };
+
+/**
+ * Real coin artwork layered over a coloured monogram.
+ *
+ * No inline onload/onerror handlers: the page runs under a CSP that blocks them,
+ * which silently defeated the first version — every icon fell back to a monogram
+ * even though the images were downloading fine. Instead the <img> simply sits on
+ * top of the monogram. The icons are opaque discs, so a loaded one hides the
+ * letters by covering them, and an icon that 404s renders nothing at all and lets
+ * the monogram show through. Pure CSS, no scripting, nothing to be blocked.
+ */
+const LOGO_SOURCES = {
+  // The icon set predates these two, so they come from CoinGecko instead.
+  SHIB: "https://coin-images.coingecko.com/coins/images/11939/small/shiba.png",
+  PEPE: "https://coin-images.coingecko.com/coins/images/29850/small/pepe-token.jpeg",
+};
+
+export function coinLogo(symbol, size = 34) {
+  const meta = ASSET_META[symbol] || {};
+  const color = meta.color || "#4b5162";
+  const src = LOGO_SOURCES[symbol]
+    || `https://cdn.jsdelivr.net/npm/cryptocurrency-icons@0.18.1/svg/color/${symbol.toLowerCase()}.svg`;
+  return `<span class="coin" style="background:${color};width:${size}px;height:${size}px;font-size:${Math.round(size * 0.32)}px">
+    <span class="coin__text">${symbol.slice(0, 4)}</span>
+    <img class="coin__img" src="${src}" alt="" width="${size}" height="${size}"/>
+  </span>`;
+}
 
 export const $ = (id) => document.getElementById(id);
 export const el = (sel, root = document) => root.querySelector(sel);
@@ -283,6 +313,36 @@ export function shortAddr(a) {
   return a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "";
 }
 
+// ─── Polling ────────────────────────────────────────────────────────
+
+/**
+ * setInterval that stops while the tab is hidden, and fires once immediately on
+ * return so the page is never stale when you look at it.
+ *
+ * This is a budget decision as much as a UX one: the node allows 5000 RPC requests
+ * per day in total and the round keeper already needs most of them. A forgotten
+ * background tab polling every 12s would burn the entire remainder on its own.
+ */
+export function pollWhileVisible(fn, intervalMs) {
+  let timer = null;
+  const tick = () => { if (!document.hidden) fn(); };
+  const start = () => {
+    if (timer) return;
+    timer = setInterval(tick, intervalMs);
+  };
+  const stop = () => {
+    if (!timer) return;
+    clearInterval(timer);
+    timer = null;
+  };
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) { stop(); }
+    else { fn(); start(); }
+  });
+  start();
+  return () => { stop(); };
+}
+
 // ─── Toasts ─────────────────────────────────────────────────────────
 
 export function toast(message, kind = "info", { timeout = 6000, html = false } = {}) {
@@ -323,7 +383,11 @@ export function mountHeader(activePage) {
       <a href="perp.html" class="nav__link${activePage === "perp" ? " is-active" : ""}">Perps</a>
     </nav>
     <div class="header__right">
-      <span id="hdr-balance" class="balance hidden"></span>
+      <button id="hdr-vault" class="vault-chip hidden" title="Your play balance — click to deposit or withdraw">
+        <span class="vault-chip__label">Play balance</span>
+        <span id="hdr-vault-amount" class="vault-chip__amount">—</span>
+      </button>
+      <span id="hdr-balance" class="balance hidden" title="GEN in your wallet"></span>
       <button id="hdr-connect" class="btn btn--primary btn--sm">Connect Wallet</button>
     </div>`;
 
@@ -335,6 +399,8 @@ export function mountHeader(activePage) {
     btn.disabled = false;
   });
 
+  $("hdr-vault").addEventListener("click", () => openVaultModal());
+
   const sync = async () => {
     if (wallet.account) {
       btn.textContent = shortAddr(wallet.account);
@@ -343,17 +409,159 @@ export function mountHeader(activePage) {
       const bal = await getBalance();
       const b = $("hdr-balance");
       if (bal !== null && b) {
-        b.textContent = `${genFromWei(bal, 2)} GEN`;
+        b.textContent = `${genFromWei(bal, 2)} GEN wallet`;
         b.classList.remove("hidden");
       }
+      await refreshVaultChip();
     } else {
       btn.textContent = "Connect Wallet";
       btn.classList.add("btn--primary");
       btn.classList.remove("btn--ghost");
       $("hdr-balance")?.classList.add("hidden");
+      $("hdr-vault")?.classList.add("hidden");
     }
   };
   onWalletChange(sync);
   sync();
-  setInterval(sync, 30000);
+  pollWhileVisible(sync, 30000);
+}
+
+// ─── Vault (play balance) ───────────────────────────────────────────
+
+export const vaultState = { balance: 0n, atRisk: 0n };
+const vaultListeners = [];
+
+export function onVaultChange(fn) { vaultListeners.push(fn); }
+
+export async function refreshVaultChip() {
+  if (!wallet.account || !CONFIG.predictAddress) return;
+  try {
+    const acct = await readPredict("get_account", [wallet.account.toLowerCase()]);
+    vaultState.balance = BigInt(acct.balance || "0");
+    vaultState.atRisk = BigInt(acct.at_risk || "0");
+    const chip = $("hdr-vault");
+    const amt = $("hdr-vault-amount");
+    if (chip && amt) {
+      amt.textContent = `${genFromWei(vaultState.balance, 2)} GEN`;
+      chip.classList.remove("hidden");
+      chip.classList.toggle("vault-chip--empty", vaultState.balance === 0n);
+    }
+    vaultListeners.forEach((fn) => { try { fn(vaultState); } catch (e) { console.error(e); } });
+  } catch (e) {
+    /* backend may be cold — the chip simply keeps its last value */
+  }
+}
+
+/** Deposit / withdraw dialog. Funding is a prerequisite for playing, so this is
+ *  reachable from every page rather than buried on one. */
+export function openVaultModal(mode = "deposit") {
+  document.getElementById("vault-modal")?.remove();
+  const walletGen = () => getBalance().then((b) => (b === null ? "0" : genFromWei(b, 4)));
+
+  const host = document.createElement("div");
+  host.id = "vault-modal";
+  host.className = "modal";
+  host.innerHTML = `
+    <div class="modal__backdrop" data-close></div>
+    <div class="modal__panel">
+      <div class="modal__head">
+        <h2>Play balance</h2>
+        <button class="modal__x" data-close aria-label="Close">✕</button>
+      </div>
+      <p class="modal__intro">
+        Bets are staked from this balance, and winnings land back in it the moment a
+        round settles — no claiming. Top it up once and play as many rounds as you like.
+      </p>
+      <div class="modal__tabs">
+        <button class="modal__tab${mode === "deposit" ? " is-active" : ""}" data-mode="deposit">Deposit</button>
+        <button class="modal__tab${mode === "withdraw" ? " is-active" : ""}" data-mode="withdraw">Withdraw</button>
+      </div>
+      <div class="modal__body">
+        <div class="stat-row">
+          <span>In your play balance</span><b id="vm-balance" class="mono">${genFromWei(vaultState.balance, 4)} GEN</b>
+        </div>
+        <div class="stat-row">
+          <span>Riding on open rounds</span><b id="vm-atrisk" class="mono">${genFromWei(vaultState.atRisk, 4)} GEN</b>
+        </div>
+        <div class="stat-row">
+          <span id="vm-src-label">In your wallet</span><b id="vm-wallet" class="mono">…</b>
+        </div>
+        <div class="field" style="margin-top:14px">
+          <label class="field__label" for="vm-amount">Amount</label>
+          <div class="input-wrap">
+            <input id="vm-amount" type="number" min="0" step="0.1" value="5" inputmode="decimal"/>
+            <span class="input-wrap__suffix">GEN</span>
+          </div>
+          <div class="quick">
+            <button data-amt="1">1</button><button data-amt="5">5</button>
+            <button data-amt="10">10</button><button data-amt="max">Max</button>
+          </div>
+        </div>
+        <p id="vm-error" class="modal__error"></p>
+        <button id="vm-submit" class="btn btn--primary btn--block" style="margin-top:12px"></button>
+        <p class="modal__note">
+          Deposits and withdrawals are on-chain and need about a minute to confirm.
+        </p>
+      </div>
+    </div>`;
+  document.body.appendChild(host);
+
+  let current = mode;
+  const amount = () => $("vm-amount").value;
+  const setMode = (m) => {
+    current = m;
+    host.querySelectorAll("[data-mode]").forEach((b) =>
+      b.classList.toggle("is-active", b.dataset.mode === m)
+    );
+    $("vm-submit").textContent = m === "deposit" ? "Deposit to play balance" : "Withdraw to wallet";
+    $("vm-src-label").textContent = m === "deposit" ? "In your wallet" : "Available to withdraw";
+    $("vm-wallet").textContent = "…";
+    if (m === "deposit") walletGen().then((v) => ($("vm-wallet").textContent = `${v} GEN`));
+    else $("vm-wallet").textContent = `${genFromWei(vaultState.balance, 4)} GEN`;
+  };
+
+  host.querySelectorAll("[data-close]").forEach((n) => n.addEventListener("click", () => host.remove()));
+  host.querySelectorAll("[data-mode]").forEach((b) => b.addEventListener("click", () => setMode(b.dataset.mode)));
+  host.querySelectorAll("[data-amt]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      if (b.dataset.amt !== "max") { $("vm-amount").value = b.dataset.amt; return; }
+      if (current === "withdraw") {
+        $("vm-amount").value = genFromWei(vaultState.balance, 6).replace(/,/g, "");
+      } else {
+        const bal = await getBalance();
+        // Leave a little for gas, or the deposit itself cannot be sent.
+        $("vm-amount").value = Math.max(0, Number(bal || 0n) / 1e18 - 0.05).toFixed(4);
+      }
+    })
+  );
+
+  $("vm-submit").addEventListener("click", async () => {
+    const err = $("vm-error");
+    const btn = $("vm-submit");
+    err.textContent = "";
+    const amt = Number(amount());
+    if (!isFinite(amt) || amt <= 0) { err.textContent = "Enter an amount greater than zero."; return; }
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = "Confirm in wallet…";
+    try {
+      const wei = parseGenToWei(amount());
+      const hash = current === "deposit"
+        ? await write(CONFIG.predictAddress, "deposit", [], wei)
+        : await write(CONFIG.predictAddress, "withdraw", [wei]);
+      btn.textContent = "Waiting for consensus…";
+      toast(`${current === "deposit" ? "Deposit" : "Withdrawal"} sent — <a href="${txLink(hash)}" target="_blank">view tx</a>`,
+            "pending", { html: true, timeout: 10000 });
+      await waitAccepted(hash);
+      toast(`${current === "deposit" ? "Deposited" : "Withdrew"} ${amount()} GEN`, "success");
+      await refreshVaultChip();
+      host.remove();
+    } catch (e) {
+      err.textContent = e.message || "Transaction failed";
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  });
+
+  setMode(mode);
 }

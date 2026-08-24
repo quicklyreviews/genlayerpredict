@@ -17,18 +17,9 @@ const { createClient } = require("genlayer-js");
 const { privateKeyToAccount } = require("viem/accounts");
 const { localnet } = require("genlayer-js/chains");
 
-// Numeric tx.status values, in the order genlayer-js declares TransactionStatus.
-const TX_STATUS = [
-  "UNINITIALIZED", "PENDING", "PROPOSING", "COMMITTING", "REVEALING", "ACCEPTED",
-  "UNDETERMINED", "FINALIZED", "CANCELED", "APPEAL_REVEALING", "APPEAL_COMMITTING",
-  "READY_TO_FINALIZE", "VALIDATORS_TIMEOUT", "LEADER_TIMEOUT",
-];
-const TERMINAL_OK = new Set(["ACCEPTED", "FINALIZED"]);
-const TERMINAL_BAD = new Set(["UNDETERMINED", "CANCELED", "VALIDATORS_TIMEOUT", "LEADER_TIMEOUT"]);
-
-function statusName(status) {
-  return typeof status === "number" ? TX_STATUS[status] ?? String(status) : String(status);
-}
+// How long to consider a sent action "in flight" before allowing a retry. Sized to
+// comfortably exceed GenLayer consensus (~70s) so we never double-send.
+const CONSENSUS_GRACE_MS = 150000;
 
 class PredictKeeper {
   constructor({ rpcUrl, privateKey, contractAddress, log = console.log }) {
@@ -85,38 +76,22 @@ class PredictKeeper {
     );
   }
 
-  /** Watch a submitted transaction to completion without blocking the sweep loop. */
-  async track(k, hash, label) {
-    for (let i = 0; i < 90; i++) {
-      await new Promise((r) => setTimeout(r, 5000));
-      let tx;
-      try {
-        tx = await this.withTimeout(this.client.getTransaction({ hash }), 20000, "getTransaction");
-      } catch (e) {
-        continue;
-      }
-      const cd = tx.consensus_data;
-      const lr = Array.isArray(cd?.leader_receipt) ? cd.leader_receipt[0] : cd?.leader_receipt;
-      if (lr?.execution_result === "ERROR") {
-        const payload = lr.result?.payload ?? lr.result;
-        this.log(`[PREDICT] ✗ ${label} reverted: ${JSON.stringify(payload)}`);
-        this.inFlight.delete(k);
-        return;
-      }
-      const name = statusName(tx.status);
-      if (TERMINAL_BAD.has(name)) {
-        this.log(`[PREDICT] ✗ ${label} ended ${name}`);
-        this.inFlight.delete(k);
-        return;
-      }
-      if (TERMINAL_OK.has(name)) {
-        this.log(`[PREDICT] ✓ ${label} ${name}`);
-        this.inFlight.delete(k);
-        return;
-      }
-    }
-    this.log(`[PREDICT] ⚠ ${label} still unconfirmed after 7.5min, releasing`);
-    this.inFlight.delete(k);
+  /**
+   * Deliberately does NOT poll the transaction to completion.
+   *
+   * Polling every 5s for a ~70s consensus cost ~14 extra RPC calls per action, and
+   * with two actions per round across every market that alone was ~19k requests a
+   * day — nearly 4x the node's entire 5000/day budget, which is exactly how the
+   * quota got exhausted. The contract already knows what is outstanding: a
+   * successful action disappears from get_pending_actions, and a failed one is
+   * still listed and simply gets retried on a later sweep. So we send and let the
+   * next sweep observe the result for free.
+   *
+   * The in-flight entry is just a debounce so the same action is not re-sent while
+   * consensus is still running.
+   */
+  release(k, after = CONSENSUS_GRACE_MS) {
+    setTimeout(() => this.inFlight.delete(k), after);
   }
 
   async sweep() {
@@ -145,7 +120,7 @@ class PredictKeeper {
           action.action === "resolve_round" ? [action.market, action.round_id] : [action.market];
         const hash = await this.send(action.action, args);
         this.log(`[PREDICT] → ${label} tx ${hash.slice(0, 12)}…`);
-        this.track(k, hash, label);
+        this.release(k);
       } catch (e) {
         this.log(`[PREDICT] ✗ ${label} send failed: ${e.message}`);
         this.inFlight.delete(k);
@@ -208,5 +183,5 @@ if (require.main === module) {
     privateKey: process.env.PRIVATE_KEY || "",
     contractAddress: address,
   });
-  keeper.start(parseInt(process.env.PREDICT_KEEPER_INTERVAL_MS || "20000", 10));
+  keeper.start(parseInt(process.env.PREDICT_KEEPER_INTERVAL_MS || "60000", 10));
 }

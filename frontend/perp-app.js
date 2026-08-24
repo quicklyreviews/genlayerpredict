@@ -23,7 +23,34 @@ const EXPLORER_URL = "https://explorer-studio.genlayer.com";
 // Public tickers used ONLY for the header display price (fast, no wallet/gas).
 // The price that actually executes a trade is fetched fresh on-chain by the
 // contract itself via GenLayer's Equivalence Principle — this is indicative only.
-const TV_SYMBOLS = { BTC: "BINANCE:BTCUSDT", ETH: "BINANCE:ETHUSDT", SOL: "BINANCE:SOLUSDT" };
+const ASSETS = {
+  BTC:  { name: "Bitcoin",   color: "#f7931a" },
+  ETH:  { name: "Ethereum",  color: "#627eea" },
+  SOL:  { name: "Solana",    color: "#14f195" },
+  BNB:  { name: "BNB",       color: "#f3ba2f" },
+  LINK: { name: "Chainlink", color: "#2a5ada" },
+  DOGE: { name: "Dogecoin",  color: "#c2a633" },
+  SHIB: { name: "Shiba Inu", color: "#f00500" },
+  PEPE: { name: "Pepe",      color: "#3d8130" },
+};
+const tvSymbol = (s) => `BINANCE:${s}USDT`;
+
+/** Real coin artwork over a coloured monogram. No inline handlers — the page's CSP
+ *  blocks them; the opaque icon simply covers the letters, and one that fails to
+ *  load renders nothing so the monogram shows through. */
+const LOGO_SOURCES = {
+  SHIB: "https://coin-images.coingecko.com/coins/images/11939/small/shiba.png",
+  PEPE: "https://coin-images.coingecko.com/coins/images/29850/small/pepe-token.jpeg",
+};
+function coinLogo(symbol, size = 20) {
+  const color = (ASSETS[symbol] || {}).color || "#4b5162";
+  const src = LOGO_SOURCES[symbol]
+    || `https://cdn.jsdelivr.net/npm/cryptocurrency-icons@0.18.1/svg/color/${symbol.toLowerCase()}.svg`;
+  return `<span class="coin" style="background:${color};width:${size}px;height:${size}px;font-size:${Math.round(size*0.32)}px">
+    <span class="coin__text">${symbol.slice(0,4)}</span>
+    <img class="coin__img" src="${src}" alt="" width="${size}" height="${size}"/>
+  </span>`;
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -161,7 +188,9 @@ function renderMarketTabs() {
     const m = markets[sym];
     const cls = sym === selectedSymbol ? "tab-market active" : "tab-market";
     const disabled = m.enabled ? "" : " (paused)";
-    return `<div class="${cls}" onclick="selectMarket('${sym}')">${sym}${disabled} <span class="text-gray-500">· up to ${m.max_leverage}x</span></div>`;
+    return `<div class="${cls}" onclick="selectMarket('${sym}')" style="display:inline-flex;align-items:center;gap:7px">
+      ${coinLogo(sym)}<span>${sym}${disabled}</span>
+      <span class="text-gray-500">· up to ${m.max_leverage}x</span></div>`;
   }).join("");
 }
 
@@ -253,7 +282,7 @@ async function fetchFundingInfo() {
 function loadTradingView() {
   const iframe = $("tradingview-chart");
   if (!iframe) return;
-  const symbol = TV_SYMBOLS[selectedSymbol] || TV_SYMBOLS.BTC;
+  const symbol = tvSymbol(selectedSymbol);
   iframe.src = `https://www.tradingview.com/widgetembed/?frameElementId=tradingview-chart&symbol=${symbol}&interval=1&hidesidetoolbar=1&symboledit=0&saveimage=0&toolbarbg=f1f3f6&studies=[]&theme=dark&style=1&timezone=Etc/UTC&studies_overrides={}&overrides={}&enabled_features=[]&disabled_features=[]&locale=en&utm_source=localhost&utm_medium=widget&utm_campaign=chart&utm_term=${symbol}`;
 }
 

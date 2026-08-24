@@ -5,3 +5,15 @@ node_modules/
 !.env.example
 .DS_Store
 dist/
+
+# Python caches from the legacy test suite
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# One-off RPC dumps produced while debugging — never worth committing
+tx.json
+temp_val.json
+
+# Local worktree bookkeeping
+.claude/worktrees/

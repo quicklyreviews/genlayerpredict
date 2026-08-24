@@ -29,7 +29,7 @@ const PORT = process.env.PORT || 3005;
 const RPC_URL = process.env.GENLAYER_RPC_URL || "https://studio.genlayer.com/api";
 const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS || "";
 const PREDICT_ADDRESS = process.env.PREDICT_CONTRACT_ADDRESS || "";
-const PREDICT_KEEPER_INTERVAL_MS = parseInt(process.env.PREDICT_KEEPER_INTERVAL_MS || "20000", 10);
+const PREDICT_KEEPER_INTERVAL_MS = parseInt(process.env.PREDICT_KEEPER_INTERVAL_MS || "60000", 10);
 // Each sweep sends one touch_price transaction per market (plus any liquidations),
 // so this interval is a direct gas cost. 60s keeps mark prices fresh enough for
 // liquidation detection without burning gas on a 3-market loop.
@@ -106,8 +106,11 @@ async function handleRead(method, args, { allowStale = true, address = CONTRACT_
 }
 
 // Prediction rounds change on a timer, so a long TTL would show a stale countdown
-// or a stale pool. Kept short; the cache still collapses concurrent tabs into one call.
-const PREDICT_TTL_MS = parseInt(process.env.PREDICT_TTL_MS || "5000", 10);
+// or a stale pool. But the node allows only 5000 requests a day in total, and the
+// keeper already needs most of that, so this is as short as the budget allows.
+// Countdowns tick locally in the browser anyway — only pools and prices need the
+// round trip, and those move slowly enough that 15s is imperceptible.
+const PREDICT_TTL_MS = parseInt(process.env.PREDICT_TTL_MS || "15000", 10);
 
 async function handlePredictRead(method, args) {
   if (!PREDICT_ADDRESS) throw new Error("PREDICT_CONTRACT_ADDRESS is not configured");

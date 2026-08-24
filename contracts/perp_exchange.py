@@ -80,10 +80,19 @@ class PerpExchange(gl.Contract):
         self.protocol_fees_collected = u256(0)
         self.liquidation_bounty_bps = u256(50)  # 0.5% of lost margin, paid to liquidator
 
+        # Leverage caps and maintenance margins are set by how violently each asset
+        # moves: the majors tolerate 20x, memecoins get a fraction of that and a
+        # much wider maintenance buffer, because a routine 10% candle would wipe out
+        # a high-leverage position before a keeper could ever liquidate it.
         default_markets = {
-            "BTC": self._market_config("bitcoin", 20, 500, 10, 300, 100, "10000000000000000"),
-            "ETH": self._market_config("ethereum", 20, 500, 10, 300, 100, "10000000000000000"),
-            "SOL": self._market_config("solana", 15, 700, 15, 300, 150, "10000000000000000"),
+            "BTC":  self._market_config("bitcoin",     20, 500, 10, 300, 100, "10000000000000000"),
+            "ETH":  self._market_config("ethereum",    20, 500, 10, 300, 100, "10000000000000000"),
+            "SOL":  self._market_config("solana",      15, 700, 15, 300, 150, "10000000000000000"),
+            "BNB":  self._market_config("binancecoin", 15, 700, 15, 300, 150, "10000000000000000"),
+            "LINK": self._market_config("chainlink",   10, 800, 20, 300, 150, "10000000000000000"),
+            "DOGE": self._market_config("dogecoin",     8, 1000, 25, 300, 200, "10000000000000000"),
+            "SHIB": self._market_config("shiba-inu",    5, 1200, 30, 300, 200, "10000000000000000"),
+            "PEPE": self._market_config("pepe",         5, 1200, 30, 300, 200, "10000000000000000"),
         }
         self.markets_json = json.dumps(default_markets)
         self.positions_json = "{}"

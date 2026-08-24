@@ -28,21 +28,26 @@
   .hidden { display:none !important; }
   .pill { font-size:10px; text-transform:uppercase; letter-spacing:.5px; padding:2px 8px; border-radius:999px; font-weight:700; }
 </style>
+<link rel="stylesheet" href="styles.css"/>
 </head>
 <body class="min-h-screen p-4">
 
-<header class="max-w-7xl mx-auto flex items-center justify-between mb-6 px-2">
-  <div class="flex items-center gap-2">
-    <img class="w-8 h-8" src="https://assets.zksync.io/images/genlayer_white.svg" alt="GenPerp"/>
-    <span class="text-2xl font-bold tracking-tight">GenPerp</span>
-    <a href="index.html" class="text-xs text-gray-400 hover:text-white ml-2">← Prediction markets</a>
-  </div>
-  <div class="flex items-center gap-3">
-    <span id="wallet-balance" class="text-xs mono text-green-400 hidden">0 GEN</span>
+<header class="header">
+  <a class="brand" href="index.html" aria-label="GenPredict home">
+    <img src="https://assets.zksync.io/images/genlayer_white.svg" alt="" width="26" height="26"/>
+    <span>GenPredict</span>
+  </a>
+  <nav class="nav" aria-label="Primary">
+    <a href="index.html" class="nav__link">Markets</a>
+    <a href="portfolio.html" class="nav__link">Portfolio</a>
+    <a href="perp.html" class="nav__link is-active">Perps</a>
+  </nav>
+  <div class="header__right">
+    <span id="wallet-balance" class="balance hidden">0 GEN</span>
     <span id="connection-label" class="text-xs text-gray-400 hidden">Disconnected</span>
-    <button id="btn-fund" class="btn-connect text-sm text-yellow-400 border-yellow-400" onclick="fundVault()">Fund Vault</button>
-    <button id="btn-connect" class="btn-connect text-sm" onclick="connectWallet()">Connect Wallet</button>
-    <button class="text-gray-500 hover:text-white text-sm" onclick="openConfig()">⚙</button>
+    <button id="btn-fund" class="btn btn--ghost btn--sm" onclick="fundVault()">Fund Vault</button>
+    <button id="btn-connect" class="btn btn--primary btn--sm" onclick="connectWallet()">Connect Wallet</button>
+    <button class="btn btn--ghost btn--sm" onclick="openConfig()" aria-label="Settings">⚙</button>
   </div>
 </header>
 

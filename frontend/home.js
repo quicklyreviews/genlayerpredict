@@ -8,7 +8,8 @@
 import {
   CONFIG, ASSET_META, $, loadConfig, readPredict, mountHeader, wallet, onWalletChange,
   autoReconnect, genFromWei, fmtCountdown, fmtHorizon, fmtUsd, fmtMultiplier, impliedPct,
-  write, waitAccepted, toast, txLink, CONSENSUS_BUFFER_SECONDS,
+  toast, CONSENSUS_BUFFER_SECONDS, coinLogo, pollWhileVisible, refreshVaultChip,
+  vaultState, openVaultModal,
 } from './shared.js';
 
 let markets = [];
@@ -17,11 +18,6 @@ let filterAsset = "all";
 let myBets = [];
 
 // ─── Rendering ──────────────────────────────────────────────────────
-
-function coinBadge(symbol) {
-  const meta = ASSET_META[symbol] || { color: "#555" };
-  return `<span class="coin" style="background:${meta.color}">${symbol.slice(0, 3)}</span>`;
-}
 
 /** A round is only bettable while there is enough time left for a transaction to
  *  reach consensus — otherwise the user pays gas for a bet that cannot land. */
@@ -92,7 +88,7 @@ function marketCard(m) {
   return `
     <a class="mcard" href="market.html?m=${encodeURIComponent(m.key)}">
       <div class="mcard__top">
-        ${coinBadge(m.symbol)}
+        ${coinLogo(m.symbol)}
         <div>
           <div class="mcard__title">${meta.name || m.symbol} up or down?</div>
           <div class="mcard__meta">${fmtHorizon(m.horizon_seconds)} horizon · ${m.symbol}${round ? ` · round #${round.id}` : ""}</div>
@@ -166,57 +162,66 @@ function renderGrid() {
   $("list-note").textContent = `${list.length} market${list.length === 1 ? "" : "s"}`;
 }
 
-// ─── Claims ─────────────────────────────────────────────────────────
+// ─── Recent settlements ─────────────────────────────────────────────
 
-function renderClaims() {
+/**
+ * Replaces what used to be a "collect your winnings" table. Winnings are credited
+ * to the play balance the moment a round resolves, so there is nothing to click —
+ * this just shows what landed, so the money arriving is still visible.
+ */
+function renderSettled() {
   const section = $("claims-section");
-  const claimable = myBets.filter((b) => (b.state === "CLAIMABLE" || b.state === "REFUNDABLE"));
-  if (!wallet.account || claimable.length === 0) {
+  const settled = myBets
+    .filter((b) => b.state === "WON" || b.state === "REFUNDED")
+    .slice(0, 6);
+  if (!wallet.account || settled.length === 0) {
     section.classList.add("hidden");
     return;
   }
   section.classList.remove("hidden");
-  $("claims-body").innerHTML = claimable.map((b) => `
+  $("claims-body").innerHTML = settled.map((b) => `
     <tr>
       <td>${b.market}</td>
       <td class="mono">#${b.round_id}</td>
       <td class="t-center" style="color:var(--${b.side === "UP" ? "up" : "down"})">${b.side === "UP" ? "▲" : "▼"} ${b.side}</td>
       <td class="t-center mono">${genFromWei(b.amount)} GEN</td>
-      <td class="t-center">${b.winner === "DRAW" ? '<span class="pill pill--draw">Draw</span>' : `<span style="color:var(--${b.winner === "UP" ? "up" : "down"})">${b.winner}</span>`}</td>
+      <td class="t-center">${
+        b.state === "REFUNDED"
+          ? '<span class="pill pill--draw">Refunded</span>'
+          : `<span style="color:var(--${b.winner === "UP" ? "up" : "down"})">${b.winner}</span>`
+      }</td>
       <td class="t-right mono" style="color:var(--up)">+${genFromWei(b.payout)} GEN</td>
-      <td class="t-right"><button class="btn btn--primary btn--sm" data-claim="${b.market}|${b.round_id}">Collect</button></td>
+      <td class="t-right"><span class="pill pill--resolved">Paid to balance</span></td>
     </tr>`).join("");
+}
 
-  $("claims-body").querySelectorAll("[data-claim]").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      const [market, roundId] = btn.dataset.claim.split("|");
-      btn.disabled = true;
-      btn.textContent = "Signing…";
-      try {
-        const hash = await write(CONFIG.predictAddress, "claim", [market, Number(roundId)]);
-        btn.textContent = "Confirming…";
-        toast(`Collecting round #${roundId} — <a href="${txLink(hash)}" target="_blank">view tx</a>`, "pending", { html: true });
-        await waitAccepted(hash);
-        toast(`Collected round #${roundId}`, "success");
-        await refreshBets();
-      } catch (e) {
-        toast(e.message || "Claim failed", "error");
-        btn.disabled = false;
-        btn.textContent = "Collect";
-      }
-    });
-  });
+/** Funding is a prerequisite for playing, so say so before the user picks a market
+ *  rather than letting them discover it at the moment they try to bet. */
+function renderFundPrompt() {
+  const host = $("fund-prompt");
+  if (!host) return;
+  if (!wallet.account || vaultState.balance > 0n) {
+    host.classList.add("hidden");
+    return;
+  }
+  host.classList.remove("hidden");
+  host.innerHTML = `
+    <p><b>Add funds to start playing.</b> Bets are staked from your play balance,
+    and winnings are paid straight back into it — no claiming, no waiting.</p>
+    <button class="btn btn--primary btn--sm" id="fund-now">Deposit GEN</button>`;
+  $("fund-now").addEventListener("click", () => openVaultModal("deposit"));
 }
 
 async function refreshBets() {
-  if (!wallet.account) { myBets = []; renderClaims(); return; }
+  if (!wallet.account) { myBets = []; renderSettled(); renderFundPrompt(); return; }
   try {
     const raw = await readPredict("get_user_portfolio", [wallet.account.toLowerCase()]);
     myBets = typeof raw === "string" ? JSON.parse(raw) : raw || [];
   } catch (e) {
     myBets = [];
   }
-  renderClaims();
+  renderSettled();
+  renderFundPrompt();
 }
 
 // ─── Data ───────────────────────────────────────────────────────────
@@ -242,11 +247,13 @@ async function refreshMarkets() {
   await autoReconnect();
   await refreshBets();
 
-  onWalletChange(() => refreshBets());
+  onWalletChange(async () => { await refreshVaultChip(); await refreshBets(); });
 
-  // Countdowns tick locally every second; contract state is only re-fetched
-  // every 12s to stay well inside the RPC budget.
+  // Countdowns are pure arithmetic on timestamps we already hold, so they tick
+  // locally every second at no network cost. Anything that needs the chain is
+  // polled far more slowly and pauses entirely while the tab is hidden — the node
+  // allows 5000 requests a day in total and the round keeper needs most of them.
   setInterval(renderGrid, 1000);
-  setInterval(refreshMarkets, 12000);
-  setInterval(refreshBets, 30000);
+  pollWhileVisible(refreshMarkets, 20000);
+  pollWhileVisible(refreshBets, 60000);
 })();

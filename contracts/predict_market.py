@@ -54,14 +54,37 @@ class PredictMarket(gl.Contract):
     as the pools fill. If close == lock the round is a DRAW and every bet is
     refundable in full, with no fee taken.
 
-    The contract holds only what bettors put in — it is never the counterparty,
-    so unlike the perp exchange there is no vault to keep solvent.
+    This contract is also the vault: it is the single place the pooled GEN lives,
+    and every payout comes out of it. Money works like an exchange account rather
+    than a per-bet transfer:
+
+        deposit()  →  credited to balances[your wallet]
+        bet(...)   →  debited from that balance, no value attached
+        resolve    →  winnings credited straight back to the balance
+        withdraw() →  paid out to your wallet
+
+    Your wallet address *is* your account number, which is what makes a deposit
+    attributable without handing anyone custody: only the wallet that owns a
+    balance can ever move it, and there is no operator key that can spend it.
+
+    Crediting winnings at resolution — instead of making each winner send a claim
+    transaction — is the single biggest quality-of-life change here. On a chain
+    that needs about a minute to agree on anything, a per-round claim was the
+    worst part of playing, and it also stranded winnings whenever a player simply
+    forgot to come back.
+
+    Because the pool must always be able to pay, the contract tracks its own
+    solvency: total_liabilities() is what it owes everyone, and it can never fall
+    below that.
     """
 
     owner: str
     treasury: u256              # accumulated fees, withdrawable by owner
     total_bets_placed: u256
     total_volume: u256
+    balances_json: str          # { "0xaddr": "wei" } — spendable, already deposited
+    balances_total: u256        # sum of balances_json, so solvency is O(1) to check
+    staked_total: u256          # stakes sitting in rounds that have not resolved yet
     markets_json: str           # { "BTC-5m": {config...} }
     rounds_json: str            # { "BTC-5m": { "7": {round...} } }
     bets_json: str              # { "BTC-5m": { "7": { "0xaddr": {bet...} } } }
@@ -76,14 +99,27 @@ class PredictMarket(gl.Contract):
         self.total_bets_placed = u256(0)
         self.total_volume = u256(0)
         self.history_limit = u256(40)
+        self.balances_json = "{}"
+        self.balances_total = u256(0)
+        self.staked_total = u256(0)
 
         # symbol, coingecko_id, horizon_seconds, betting_seconds, fee_bps, min_bet
+        #
+        # Only the majors get a 5m market. Every round costs the keeper two
+        # transactions, and a 5m market cycles 2.5x more often than a 15m one —
+        # against the node's 5000-requests-per-day ceiling, putting every coin on
+        # 5m would exhaust the quota before lunchtime. The long tail runs at 15m.
         defaults = [
             ("BTC", "bitcoin", 300, 180, 300, "10000000000000000"),
             ("ETH", "ethereum", 300, 180, 300, "10000000000000000"),
             ("SOL", "solana", 300, 180, 300, "10000000000000000"),
             ("BTC", "bitcoin", 900, 300, 300, "10000000000000000"),
             ("ETH", "ethereum", 900, 300, 300, "10000000000000000"),
+            ("BNB", "binancecoin", 900, 300, 300, "10000000000000000"),
+            ("LINK", "chainlink", 900, 300, 300, "10000000000000000"),
+            ("DOGE", "dogecoin", 900, 300, 300, "10000000000000000"),
+            ("SHIB", "shiba-inu", 900, 300, 300, "10000000000000000"),
+            ("PEPE", "pepe", 900, 300, 300, "10000000000000000"),
         ]
         markets: dict = {}
         for sym, cg, horizon, betting, fee, min_bet in defaults:
@@ -114,6 +150,27 @@ class PredictMarket(gl.Contract):
     def _require_owner(self) -> None:
         if str(gl.message.sender_address).lower() != self.owner:
             raise gl.vm.UserError("Only owner can call this")
+
+    # ─── Vault ledger ────────────────────────────────────────────────
+
+    def _credit(self, balances: dict, addr: str, amount: int) -> None:
+        a = addr.lower()
+        balances[a] = str(int(balances.get(a, "0")) + amount)
+        self.balances_total += u256(amount)
+
+    def _debit(self, balances: dict, addr: str, amount: int) -> None:
+        a = addr.lower()
+        have = int(balances.get(a, "0"))
+        if have < amount:
+            raise gl.vm.UserError(
+                f"Insufficient balance: have {have} wei, need {amount} wei. Deposit first."
+            )
+        rest = have - amount
+        if rest == 0:
+            balances.pop(a, None)
+        else:
+            balances[a] = str(rest)
+        self.balances_total -= u256(amount)
 
     def _market(self, markets: dict, key: str) -> dict:
         m = markets.get(key)
@@ -425,6 +482,31 @@ class PredictMarket(gl.Contract):
 
         rounds[market_key] = mrounds
         bets = self._load(self.bets_json, {})
+
+        # Pay everyone out right here, straight into their vault balance. There is
+        # no claim step: a player should not have to send a transaction and wait a
+        # minute for consensus just to receive money they already won, and anyone
+        # who never came back used to forfeit it silently.
+        balances = self._load(self.balances_json, {})
+        rbets = bets.get(market_key, {}).get(rid, {})
+        paid_out = 0
+        winners = 0
+        for addr, bet in rbets.items():
+            if int(bet.get("settled", 0)) == 1:
+                continue
+            payout = self._payout_for(rnd, market, bet["side"], int(bet["amount"]))
+            bet["settled"] = 1
+            bet["payout"] = str(payout)
+            if payout > 0:
+                self._credit(balances, addr, payout)
+                paid_out += payout
+                winners += 1
+        # Stakes for this round are no longer at risk, whatever the outcome.
+        self.staked_total = u256(max(0, int(self.staked_total) - total))
+        self.balances_json = json.dumps(balances)
+        if rbets:
+            bets[market_key][rid] = rbets
+
         self._prune(rounds, bets, market_key)
         self.rounds_json = json.dumps(rounds)
         self.bets_json = json.dumps(bets)
@@ -437,13 +519,58 @@ class PredictMarket(gl.Contract):
             "winner": winner,
             "settlement": settlement,
             "fee": str(fee),
+            "paid_out": str(paid_out),
+            "winners": winners,
         }
+
+    # ─── Vault: deposit / withdraw ───────────────────────────────────
+
+    @gl.public.write.payable
+    def deposit(self) -> dict[str, typing.Any]:
+        """Top up your account. The sender's wallet address is the account number."""
+        amount = int(gl.message.value)
+        if amount <= 0:
+            raise gl.vm.UserError("Deposit must be greater than zero")
+        balances = self._load(self.balances_json, {})
+        player = str(gl.message.sender_address).lower()
+        self._credit(balances, player, amount)
+        self.balances_json = json.dumps(balances)
+        return {"address": player, "deposited": str(amount), "balance": balances[player]}
+
+    @gl.public.write
+    def withdraw(self, amount: u256) -> dict[str, typing.Any]:
+        """Take GEN back out. Only ever touches the caller's own balance; stakes
+        already committed to an unresolved round are not part of it."""
+        amt = int(amount)
+        if amt <= 0:
+            raise gl.vm.UserError("Withdraw amount must be greater than zero")
+        balances = self._load(self.balances_json, {})
+        player = str(gl.message.sender_address).lower()
+        self._debit(balances, player, amt)
+        self.balances_json = json.dumps(balances)
+        _Recipient(gl.message.sender_address).emit_transfer(value=u256(amt))
+        return {"withdrawn": str(amt), "balance": balances.get(player, "0")}
+
+    @gl.public.write
+    def withdraw_all(self) -> dict[str, typing.Any]:
+        """Convenience for cashing out — avoids making the UI guess at dust."""
+        balances = self._load(self.balances_json, {})
+        player = str(gl.message.sender_address).lower()
+        amt = int(balances.get(player, "0"))
+        if amt <= 0:
+            raise gl.vm.UserError("Nothing to withdraw")
+        self._debit(balances, player, amt)
+        self.balances_json = json.dumps(balances)
+        _Recipient(gl.message.sender_address).emit_transfer(value=u256(amt))
+        return {"withdrawn": str(amt), "balance": "0"}
 
     # ─── Betting ─────────────────────────────────────────────────────
 
-    @gl.public.write.payable
-    def bet(self, market_key: str, side: str) -> dict[str, typing.Any]:
-        """Back UP or DOWN on the market's open round with the attached GEN."""
+    @gl.public.write
+    def bet(self, market_key: str, side: str, amount: u256) -> dict[str, typing.Any]:
+        """Back UP or DOWN on the market's open round, staking from your deposited
+        balance. Not payable on purpose: funds come from the vault you already
+        topped up, so placing a bet moves no GEN and needs no value attached."""
         side = side.upper()
         if side not in ("UP", "DOWN"):
             raise gl.vm.UserError("side must be UP or DOWN")
@@ -464,11 +591,18 @@ class PredictMarket(gl.Contract):
         if now >= int(rnd["lock_ts"]):
             raise gl.vm.UserError("Betting has closed for this round")
 
-        amount = int(gl.message.value)
-        if amount < int(market["min_bet"]):
+        stake = int(amount)
+        if stake < int(market["min_bet"]):
             raise gl.vm.UserError(f"Bet must be at least {market['min_bet']} wei")
 
         player = str(gl.message.sender_address).lower()
+        balances = self._load(self.balances_json, {})
+        # Raises with a "deposit first" message when the account is short, which is
+        # the whole point of making funding mandatory before play.
+        self._debit(balances, player, stake)
+        self.balances_json = json.dumps(balances)
+        self.staked_total += u256(stake)
+
         bets = self._load(self.bets_json, {})
         mbets = bets.get(market_key, {})
         rbets = mbets.get(rid, {})
@@ -478,15 +612,15 @@ class PredictMarket(gl.Contract):
             # silently would change a payout the user already saw. Reject instead.
             raise gl.vm.UserError(f"Already bet {existing['side']} on this round")
 
-        rbets[player] = {"side": side, "amount": str(amount), "claimed": 0}
+        rbets[player] = {"side": side, "amount": str(stake), "settled": 0}
         mbets[rid] = rbets
         bets[market_key] = mbets
 
         if side == "UP":
-            rnd["up_pool"] = str(int(rnd["up_pool"]) + amount)
+            rnd["up_pool"] = str(int(rnd["up_pool"]) + stake)
             rnd["up_count"] = int(rnd["up_count"]) + 1
         else:
-            rnd["down_pool"] = str(int(rnd["down_pool"]) + amount)
+            rnd["down_pool"] = str(int(rnd["down_pool"]) + stake)
             rnd["down_count"] = int(rnd["down_count"]) + 1
         mrounds[rid] = rnd
         rounds[market_key] = mrounds
@@ -494,7 +628,7 @@ class PredictMarket(gl.Contract):
         self.rounds_json = json.dumps(rounds)
         self.bets_json = json.dumps(bets)
         self.total_bets_placed += u256(1)
-        self.total_volume += u256(amount)
+        self.total_volume += u256(stake)
 
         return {
             "market": market_key,
@@ -502,46 +636,6 @@ class PredictMarket(gl.Contract):
             "side": side,
             "amount": str(amount),
             "lock_ts": int(rnd["lock_ts"]),
-        }
-
-    @gl.public.write
-    def claim(self, market_key: str, round_id: u256) -> dict[str, typing.Any]:
-        """Collect winnings (or a DRAW refund) for one resolved round."""
-        markets = self._load(self.markets_json, {})
-        market = self._market(markets, market_key)
-        rounds = self._load(self.rounds_json, {})
-        rid = str(int(round_id))
-        rnd = rounds.get(market_key, {}).get(rid)
-        if not rnd:
-            raise gl.vm.UserError("Round not found (it may have been pruned)")
-        if rnd.get("status") != "RESOLVED":
-            raise gl.vm.UserError("Round is not resolved yet")
-
-        player = str(gl.message.sender_address).lower()
-        bets = self._load(self.bets_json, {})
-        rbets = bets.get(market_key, {}).get(rid, {})
-        bet = rbets.get(player)
-        if not bet:
-            raise gl.vm.UserError("No bet found for this round")
-        if int(bet.get("claimed", 0)) == 1:
-            raise gl.vm.UserError("Already claimed")
-
-        payout = self._payout_for(rnd, market, bet["side"], int(bet["amount"]))
-        if payout <= 0:
-            raise gl.vm.UserError("Nothing to claim — this bet did not win")
-        refunded = rnd.get("settlement", "PAID") == "VOID"
-
-        bet["claimed"] = 1
-        rbets[player] = bet
-        bets[market_key][rid] = rbets
-        self.bets_json = json.dumps(bets)
-
-        _Recipient(gl.message.sender_address).emit_transfer(value=u256(payout))
-        return {
-            "market": market_key,
-            "round_id": int(round_id),
-            "payout": str(payout),
-            "refund": 1 if refunded else 0,
         }
 
     # ─── Views ───────────────────────────────────────────────────────
@@ -691,20 +785,22 @@ class PredictMarket(gl.Contract):
                 continue
             status = rnd.get("status", "")
             winner = rnd.get("winner", "")
-            claimed = int(bet.get("claimed", 0)) == 1
-            payout = 0
-            if status == "RESOLVED":
+            # Settled bets carry the amount actually credited; recomputing it would
+            # drift if pools were pruned, so trust what resolution recorded.
+            payout = int(bet.get("payout", "0"))
+            if status == "RESOLVED" and "payout" not in bet:
                 payout = self._payout_for(rnd, market, bet["side"], int(bet["amount"]))
+
+            # Nothing here is ever "claimable": resolution already paid it into the
+            # player's balance, so the only question is how the round turned out.
             if status != "RESOLVED":
                 state = "LIVE" if status == "LOCKED" else "PENDING"
-            elif payout <= 0:
-                state = "LOST"
-            elif claimed:
-                state = "CLAIMED"
             elif rnd.get("settlement") == "VOID":
-                state = "REFUNDABLE"
+                state = "REFUNDED"
+            elif payout > 0:
+                state = "WON"
             else:
-                state = "CLAIMABLE"
+                state = "LOST"
             out.append({
                 "market": market_key,
                 "round_id": int(rid),
@@ -720,6 +816,54 @@ class PredictMarket(gl.Contract):
             })
         out.sort(key=lambda b: b["round_id"], reverse=True)
         return out
+
+    @gl.public.view
+    def get_balance(self, addr: str) -> str:
+        """Spendable balance for one account. This is what betting draws on."""
+        try:
+            return json.loads(self.balances_json).get(addr.lower(), "0")
+        except Exception:
+            return "0"
+
+    @gl.public.view
+    def get_account(self, addr: str) -> dict[str, typing.Any]:
+        """Everything the header needs about one player, in a single call."""
+        a = addr.lower()
+        balance = 0
+        try:
+            balance = int(json.loads(self.balances_json).get(a, "0"))
+        except Exception:
+            balance = 0
+        at_risk = 0
+        for market_key in self._load(self.markets_json, {}).keys():
+            for b in self._user_bets(a, market_key):
+                if b["state"] in ("PENDING", "LIVE"):
+                    at_risk += int(b["amount"])
+        return {
+            "address": a,
+            "balance": str(balance),
+            "at_risk": str(at_risk),
+            "total": str(balance + at_risk),
+        }
+
+    @gl.public.view
+    def get_vault(self) -> dict[str, typing.Any]:
+        """Solvency at a glance: what the pool owes versus what it is holding.
+
+        liabilities = player balances + stakes still riding on unresolved rounds
+        + fees owed to the treasury. Every one of those is money the contract must
+        still be able to pay out, so it should never exceed what it holds.
+        """
+        balances = int(self.balances_total)
+        staked = int(self.staked_total)
+        treasury = int(self.treasury)
+        return {
+            "player_balances": str(balances),
+            "at_risk_in_rounds": str(staked),
+            "treasury": str(treasury),
+            "total_liabilities": str(balances + staked + treasury),
+            "accounts": len(self._load(self.balances_json, {})),
+        }
 
     @gl.public.view
     def get_user_bets(self, addr: str, market_key: str) -> str:

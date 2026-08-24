@@ -8,7 +8,8 @@ import {
   CONFIG, ASSET_META, $, loadConfig, readPredict, mountHeader, wallet, onWalletChange,
   autoReconnect, connectWallet, parseGenToWei, genFromWei, fmtCountdown, fmtHorizon,
   fmtUsd, fmtMultiplier, impliedPct, fmtClock, write, waitAccepted, toast, txLink,
-  getBalance, CONSENSUS_BUFFER_SECONDS,
+  CONSENSUS_BUFFER_SECONDS, coinLogo, pollWhileVisible, refreshVaultChip, vaultState,
+  openVaultModal, onVaultChange,
 } from './shared.js';
 
 const marketKey = new URLSearchParams(location.search).get("m") || "BTC-5m";
@@ -35,7 +36,9 @@ function renderHeader() {
   const m = detail.market;
   const meta = ASSET_META[m.symbol] || { name: m.symbol, tv: "BINANCE:BTCUSDT" };
   document.title = `${meta.name} ${fmtHorizon(m.horizon_seconds)} — GenPredict`;
-  $("mkt-title").textContent = `${meta.name} up or down?`;
+  $("mkt-title").innerHTML =
+    `<span style="display:inline-flex;align-items:center;gap:10px">
+       ${coinLogo(m.symbol, 28)}${meta.name} up or down?</span>`;
   $("mkt-sub").textContent =
     `Every round locks a price, then settles ${fmtHorizon(m.horizon_seconds)} later. ` +
     `Winners split the pool after a ${(m.fee_bps / 100).toFixed(1)}% fee.`;
@@ -243,6 +246,7 @@ function panelSignature() {
     mine ? `mine:${mine.side}` : "nobet",
     selectedSide ?? "noside",
     submitting ? "busy" : "idle",
+    vaultState.balance === 0n ? "unfunded" : "funded",
   ].join("|");
 }
 
@@ -298,6 +302,20 @@ function renderBetPanel() {
         <span>↻</span><span>A fresh round opens the instant this one locks, so you will not
         have to wait for the ${fmtHorizon(detail.market.horizon_seconds)} horizon to play out.</span>
       </div>`;
+    return;
+  }
+
+  // Funding is mandatory, so a player with an empty balance gets the deposit call
+  // to action in place of a form they cannot submit.
+  if (wallet.account && vaultState.balance === 0n) {
+    host.innerHTML = `
+      <div class="fund-prompt" style="margin-bottom:12px">
+        <p><b>Add funds to place a bet.</b> Stakes come from your play balance, and
+        winnings are paid back into it automatically when the round settles.</p>
+        <button class="btn btn--primary btn--sm" id="bp-fund">Deposit GEN</button>
+      </div>
+      <div class="pool-row"><span>Betting closes in</span><b data-tick-countdown>${fmtCountdown(left)}</b></div>`;
+    $("bp-fund").addEventListener("click", () => openVaultModal("deposit"));
     return;
   }
 
@@ -385,10 +403,9 @@ function renderBetPanel() {
   host.querySelectorAll("[data-stake]").forEach((b) =>
     b.addEventListener("click", async () => {
       if (b.dataset.stake === "max") {
-        const bal = await getBalance();
-        // Leave a little behind for gas rather than handing back a bet that cannot be sent.
-        const usable = bal ? Math.max(0, Number(bal) / 1e18 - 0.05) : 0;
-        stake = usable.toFixed(3);
+        // The whole play balance is stakeable — gas is paid from the wallet, not
+        // from this, so there is nothing to hold back.
+        stake = (Number(vaultState.balance) / 1e18).toFixed(3);
       } else {
         stake = b.dataset.stake;
       }
@@ -432,16 +449,25 @@ async function submitBet() {
     return;
   }
 
+  // Stakes come out of the play balance, so catch a shortfall here rather than
+  // letting the user sign a transaction that the contract will only reject.
+  const wei = parseGenToWei(stake);
+  if (vaultState.balance < wei) {
+    toast(`Not enough in your play balance — you have ${genFromWei(vaultState.balance, 3)} GEN`, "error");
+    openVaultModal("deposit");
+    return;
+  }
+
   submitting = true;
   renderBetPanel();
   try {
-    const hash = await write(CONFIG.predictAddress, "bet", [marketKey, selectedSide], parseGenToWei(stake));
+    const hash = await write(CONFIG.predictAddress, "bet", [marketKey, selectedSide, wei]);
     toast(`Bet sent — <a href="${txLink(hash)}" target="_blank">view tx</a>. Waiting for consensus…`,
           "pending", { html: true, timeout: 12000 });
     await waitAccepted(hash);
     toast(`${stake} GEN on ${selectedSide} confirmed for round #${round.id}`, "success");
     selectedSide = null;
-    await Promise.all([refresh(), refreshBets()]);
+    await Promise.all([refresh(), refreshBets(), refreshVaultChip()]);
   } catch (e) {
     toast(e.message || "Bet failed", "error");
   } finally {
@@ -462,17 +488,18 @@ function renderMyBets() {
     host.innerHTML = `<div class="empty" style="padding:20px">No bets on this market yet</div>`;
     return;
   }
+  // No collect button anywhere: resolution credits the play balance directly, so a
+  // settled row is a receipt rather than something still owed to the player.
   const statePill = {
     PENDING: `<span class="pill pill--open">Open</span>`,
-    LIVE: `<span class="pill pill--live">Live</span>`,
-    CLAIMABLE: `<span class="pill pill--open">Won</span>`,
-    REFUNDABLE: `<span class="pill pill--draw">Refund</span>`,
-    CLAIMED: `<span class="pill pill--resolved">Collected</span>`,
+    LIVE: `<span class="pill pill--live"><span class="dot-live"></span>Live</span>`,
+    WON: `<span class="pill pill--open">Won</span>`,
+    REFUNDED: `<span class="pill pill--draw">Refunded</span>`,
     LOST: `<span class="pill pill--resolved">Lost</span>`,
   };
   host.innerHTML = `<div class="table-scroll"><table>
     <thead><tr><th>Round</th><th class="t-center">Pick</th><th class="t-center">Stake</th>
-    <th class="t-center">Status</th><th class="t-right">Payout</th></tr></thead>
+    <th class="t-center">Result</th><th class="t-right">Paid</th></tr></thead>
     <tbody>${myBets.slice(0, 12).map((b) => `
       <tr>
         <td class="mono">#${b.round_id}</td>
@@ -480,31 +507,13 @@ function renderMyBets() {
         <td class="t-center mono">${genFromWei(b.amount, 2)}</td>
         <td class="t-center">${statePill[b.state] || b.state}</td>
         <td class="t-right">${
-          (b.state === "CLAIMABLE" || b.state === "REFUNDABLE")
-            ? `<button class="btn btn--primary btn--sm" data-claim="${b.round_id}">Collect ${genFromWei(b.payout, 2)}</button>`
-            : b.state === "CLAIMED"
-            ? `<span class="mono" style="color:var(--text-muted)">${genFromWei(b.payout, 2)}</span>`
+          b.state === "WON" || b.state === "REFUNDED"
+            ? `<span class="mono" style="color:var(--up)">+${genFromWei(b.payout, 3)}</span>`
             : b.state === "LOST"
-            ? `<span style="color:var(--text-muted)">—</span>`
+            ? `<span class="mono" style="color:var(--down)">−${genFromWei(b.amount, 3)}</span>`
             : `<span style="color:var(--text-muted)">pending</span>`
         }</td>
       </tr>`).join("")}</tbody></table></div>`;
-
-  host.querySelectorAll("[data-claim]").forEach((btn) =>
-    btn.addEventListener("click", async () => {
-      btn.disabled = true; btn.textContent = "Signing…";
-      try {
-        const hash = await write(CONFIG.predictAddress, "claim", [marketKey, Number(btn.dataset.claim)]);
-        toast(`Collecting — <a href="${txLink(hash)}" target="_blank">view tx</a>`, "pending", { html: true });
-        await waitAccepted(hash);
-        toast("Winnings collected", "success");
-        await refreshBets();
-      } catch (e) {
-        toast(e.message || "Claim failed", "error");
-        btn.disabled = false; btn.textContent = "Collect";
-      }
-    })
-  );
 }
 
 // ─── Data ───────────────────────────────────────────────────────────
@@ -545,13 +554,18 @@ async function refreshBets() {
   await refresh();
   await refreshSpot();
   await autoReconnect();
+  await refreshVaultChip();
   await refreshBets();
 
-  onWalletChange(() => refreshBets());
+  onWalletChange(async () => { await refreshVaultChip(); await refreshBets(); });
 
   // Local ticks keep countdowns smooth; contract reads stay inside the RPC budget.
+  // Countdowns are local arithmetic and cost nothing; chain reads are slow-polled
+  // and pause with the tab, because the node's daily request budget is shared with
+  // the round keeper.
   setInterval(() => { if (detail) { renderRounds(); tickBetPanel(); } }, 1000);
-  setInterval(refresh, 10000);
-  setInterval(refreshSpot, 10000);
-  setInterval(refreshBets, 30000);
+  pollWhileVisible(refresh, 20000);
+  pollWhileVisible(refreshSpot, 20000);
+  pollWhileVisible(refreshBets, 60000);
+  onVaultChange(() => { if (detail) renderBetPanel(); });
 })();
