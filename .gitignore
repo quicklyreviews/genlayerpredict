@@ -17,3 +17,4 @@ temp_val.json
 
 # Local worktree bookkeeping
 .claude/worktrees/
+.probe/

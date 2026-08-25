@@ -106,6 +106,31 @@ Each of these was found by running the thing on-chain, not by reading the code:
 4. **Hidden in-flight rounds.** Because the horizon outlasts the betting window, two rounds are normally locked at once, but the contract only tracked the most recent — hiding a round the user had money in. `get_market_detail` now returns every locked round.
 5. **A card that contradicted itself.** A market showing `LIVE` alongside an empty pool reads as broken: the badge described the live round while the numbers came from the next one. Badge and numbers now always describe the same round.
 
+## 🔗 Cross-contract calls: what actually works
+
+A single vault shared by GenPredict and GenPerp needs one contract to call another,
+which is barely documented. Probed on-chain rather than trusted, and the answers were
+not what the documentation suggested:
+
+| Question | Answer |
+|---|---|
+| Is it `gl.ContractAt`? | **No.** That name does not exist — `AttributeError: module 'genlayer.gl' has no attribute 'ContractAt'`. Listing `dir(gl)` on-chain gives the real one: **`gl.get_contract_at`**, alongside `ContractProxy`, `deploy_contract` and `genvm_contracts`. |
+| Reading another contract | **Works, synchronously.** `gl.get_contract_at(addr).view().some_method()` returns inline, usable from a view method. |
+| Writing to another contract | **Works, but asynchronously.** `.emit().some_method()` returns immediately and the callee's state is unchanged when the parent transaction is ACCEPTED. The sub-call lands after the parent finalises. (`emit()` takes no `gas` kwarg — passing one is a `TypeError`.) |
+| Who does the callee see as sender? | **The calling contract**, not the original wallet — so a vault can authorise callers by allowlist. |
+
+**Why the shared vault is not built on this.** The async write is the blocker. Debiting a
+balance has to be atomic with placing the bet: if the stake is recorded and the debit
+lands a minute later — or fails because the balance moved — the two contracts disagree
+about who owns what, and the bet is already on the books. Making that safe needs a
+reserve-then-confirm protocol with compensation on every failure path, which is a lot of
+new failure modes to buy one shared pool.
+
+So each product owns its own funds. That still delivers what a shared vault was wanted
+for: funding is mandatory, deposits are attributable per wallet, and one contract holds
+the pool it pays from. The async path *is* safe for crediting, since a credit cannot
+fail, so paying out across contracts stays open if it is ever needed.
+
 ## ⚠️ GenVM gotchas found the hard way
 
 Three constraints cost real deploys while building this — they are enforced by GenVM but not spelled out in the docs:
