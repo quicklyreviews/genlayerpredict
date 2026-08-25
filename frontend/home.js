@@ -11,6 +11,7 @@ import {
   toast, CONSENSUS_BUFFER_SECONDS, coinLogo, pollWhileVisible, refreshVaultChip,
   vaultState, openVaultModal,
 } from './shared.js';
+import { loadSession, refreshSessionGas } from './session.js';
 
 let markets = [];
 let filterHorizon = "all";
@@ -390,6 +391,7 @@ async function refreshMarkets() {
   await refreshMarkets();
   initSearch();
   await autoReconnect();
+  if (loadSession()) refreshSessionGas();
   await refreshBets();
 
   onWalletChange(async () => { await refreshVaultChip(); await refreshBets(); });

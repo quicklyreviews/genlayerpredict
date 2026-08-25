@@ -13,6 +13,8 @@ export const CONFIG = {
   backendUrl: "http://localhost:3005",
   predictAddress: "",
   perpAddress: "",
+  // Studionet only — see scripts/chain.js for the same rule on the server side.
+  rpcUrl: "https://studio.genlayer.com/api",
 };
 
 export const STUDIO_CHAIN_ID = "0xF22F"; // 61999
@@ -313,6 +315,133 @@ export function shortAddr(a) {
   return a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "";
 }
 
+/**
+ * The "instant play" panel: turn a session key on, fund it, or cash it out.
+ *
+ * Written to be honest about the trade rather than to sell it. A key that lives in
+ * the browser is a real exposure, so the panel says so in the same breath as the
+ * benefit, and steers towards funding a small amount.
+ */
+async function renderInstantPanel(host) {
+  const mod = await import("./session.js");
+  const el = document.getElementById("vm-instant");
+  if (!el) return;
+
+  await mod.refreshSessionGas();
+  const s = mod.sessionSummary();
+
+  if (!s.active) {
+    el.innerHTML = `
+      <p class="modal__intro" style="padding-left:0;padding-right:0">
+        Every bet normally needs a wallet signature. On a chain that takes a minute to
+        agree, that prompt can outlast the betting window. Instant play creates a
+        throwaway key in this browser that signs for you — one approval to fund it,
+        then no prompts at all.
+      </p>
+      <div class="notice notice--warn" style="margin:10px 0">
+        <span>🔑</span>
+        <span>The key is stored in this browser, so treat it like cash in a pocket.
+        Fund it with what you plan to play with, not your balance. Your main wallet
+        signs once and is never otherwise exposed.</span>
+      </div>
+      <div class="field">
+        <label class="field__label" for="vm-fund">Fund with</label>
+        <div class="input-wrap">
+          <input id="vm-fund" type="number" min="0" step="0.1" value="1" inputmode="decimal"/>
+          <span class="input-wrap__suffix">GEN</span>
+        </div>
+        <p class="modal__note" style="text-align:left">Covers both your stakes and the
+        transaction fees the session wallet pays from here on.</p>
+      </div>
+      <p id="vm-instant-error" class="modal__error"></p>
+      <button id="vm-enable" class="btn btn--primary btn--block">Turn on instant play</button>`;
+
+    document.getElementById("vm-enable").addEventListener("click", async () => {
+      const btn = document.getElementById("vm-enable");
+      const err = document.getElementById("vm-instant-error");
+      const amount = document.getElementById("vm-fund").value;
+      err.textContent = "";
+      if (!(Number(amount) > 0)) { err.textContent = "Enter an amount above zero."; return; }
+      btn.disabled = true;
+      btn.textContent = "Confirm in wallet…";
+      try {
+        mod.createSession();
+        const hash = await mod.fundSession(amount);
+        toast(`Funding the session wallet — <a href="${txLink(hash)}" target="_blank">view tx</a>`,
+              "pending", { html: true, timeout: 10000 });
+        // The transfer needs to land before anything can be signed against it.
+        for (let i = 0; i < 40; i++) {
+          await new Promise((r) => setTimeout(r, 5000));
+          const bal = await mod.refreshSessionGas();
+          if (bal > 0n) break;
+        }
+        toast("Instant play is on — bets no longer need a signature", "success");
+        renderInstantPanel(host);
+      } catch (e) {
+        err.textContent = e.message || "Could not fund the session wallet";
+        btn.disabled = false;
+        btn.textContent = "Turn on instant play";
+      }
+    });
+    return;
+  }
+
+  el.innerHTML = `
+    <div class="stat-row"><span>Status</span><b style="color:var(--up)">⚡ On</b></div>
+    <div class="stat-row"><span>Session wallet</span>
+      <b class="mono" style="font-size:11.5px">${s.address.slice(0, 10)}…${s.address.slice(-6)}</b></div>
+    <div class="stat-row"><span>Left for fees</span>
+      <b class="mono" style="${s.lowGas ? "color:var(--warn)" : ""}">${genFromWei(s.gas, 4)} GEN</b></div>
+    ${s.lowGas ? `<div class="notice notice--warn" style="margin-top:10px"><span>⛽</span>
+      <span>Running low. Top up, or a bet will fail for want of a fee.</span></div>` : ""}
+    <div class="field" style="margin-top:14px">
+      <label class="field__label" for="vm-topup">Top up</label>
+      <div class="input-wrap">
+        <input id="vm-topup" type="number" min="0" step="0.1" value="1" inputmode="decimal"/>
+        <span class="input-wrap__suffix">GEN</span>
+      </div>
+    </div>
+    <p id="vm-instant-error" class="modal__error"></p>
+    <button id="vm-topup-btn" class="btn btn--primary btn--block">Add funds</button>
+    <button id="vm-sweep" class="btn btn--ghost btn--block" style="margin-top:8px">
+      Cash out and turn off</button>
+    <p class="modal__note">Cashing out returns the remaining GEN to the wallet that
+    funded it and forgets the key.</p>`;
+
+  document.getElementById("vm-topup-btn").addEventListener("click", async () => {
+    const btn = document.getElementById("vm-topup-btn");
+    const err = document.getElementById("vm-instant-error");
+    err.textContent = "";
+    btn.disabled = true; btn.textContent = "Confirm in wallet…";
+    try {
+      const hash = await mod.fundSession(document.getElementById("vm-topup").value);
+      toast(`Top-up sent — <a href="${txLink(hash)}" target="_blank">view tx</a>`, "pending", { html: true });
+      for (let i = 0; i < 30; i++) { await new Promise((r) => setTimeout(r, 5000)); await mod.refreshSessionGas(); }
+      renderInstantPanel(host);
+    } catch (e) {
+      err.textContent = e.message || "Top-up failed";
+      btn.disabled = false; btn.textContent = "Add funds";
+    }
+  });
+
+  document.getElementById("vm-sweep").addEventListener("click", async () => {
+    const btn = document.getElementById("vm-sweep");
+    const err = document.getElementById("vm-instant-error");
+    err.textContent = "";
+    btn.disabled = true; btn.textContent = "Returning funds…";
+    try {
+      const { hash, amount } = await mod.sweepSession();
+      toast(`Returned ${genFromWei(amount, 4)} GEN — <a href="${txLink(hash)}" target="_blank">view tx</a>`,
+            "success", { html: true });
+      mod.forgetSession();
+      renderInstantPanel(host);
+    } catch (e) {
+      err.textContent = e.message || "Could not return the funds";
+      btn.disabled = false; btn.textContent = "Cash out and turn off";
+    }
+  });
+}
+
 // ─── Polling ────────────────────────────────────────────────────────
 
 /**
@@ -515,8 +644,9 @@ export function openVaultModal(mode = "deposit") {
       <div class="modal__tabs">
         <button class="modal__tab${mode === "deposit" ? " is-active" : ""}" data-mode="deposit">Deposit</button>
         <button class="modal__tab${mode === "withdraw" ? " is-active" : ""}" data-mode="withdraw">Withdraw</button>
+        <button class="modal__tab${mode === "instant" ? " is-active" : ""}" data-mode="instant">⚡ Instant play</button>
       </div>
-      <div class="modal__body">
+      <div class="modal__body" id="vm-money">
         <div class="stat-row">
           <span>In your play balance</span><b id="vm-balance" class="mono">${genFromWei(vaultState.balance, 4)} GEN</b>
         </div>
@@ -543,16 +673,20 @@ export function openVaultModal(mode = "deposit") {
           Deposits and withdrawals are on-chain and need about a minute to confirm.
         </p>
       </div>
+      <div class="modal__body hidden" id="vm-instant"></div>
     </div>`;
   document.body.appendChild(host);
 
   let current = mode;
   const amount = () => $("vm-amount").value;
-  const setMode = (m) => {
+  const setMode = async (m) => {
     current = m;
     host.querySelectorAll("[data-mode]").forEach((b) =>
       b.classList.toggle("is-active", b.dataset.mode === m)
     );
+    $("vm-money").classList.toggle("hidden", m === "instant");
+    $("vm-instant").classList.toggle("hidden", m !== "instant");
+    if (m === "instant") return renderInstantPanel(host);
     $("vm-submit").textContent = m === "deposit" ? "Deposit to play balance" : "Withdraw to wallet";
     $("vm-src-label").textContent = m === "deposit" ? "In your wallet" : "Available to withdraw";
     $("vm-wallet").textContent = "…";

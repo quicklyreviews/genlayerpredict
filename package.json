@@ -18,7 +18,8 @@
     "keeper:perp": "tsx scripts/perp-keeper.ts",
     "backend": "node scripts/backend-proxy.js",
     "coins": "node scripts/fetch-coins.js",
-    "smoke:pool": "tsx scripts/pool-smoke-test.ts"
+    "smoke:pool": "tsx scripts/pool-smoke-test.ts",
+    "smoke:session": "tsx scripts/session-smoke-test.ts"
   },
   "keywords": [],
   "author": "",
