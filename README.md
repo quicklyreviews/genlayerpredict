@@ -14,6 +14,10 @@ Both fetch prices with GenLayer's **Intelligent Contracts** and **Equivalence Pr
 | `portfolio.html` | Every bet you've made, P&L, and your play balance |
 | `perp.html` | The leveraged perp terminal |
 
+> **Chỉ muốn dùng thử?** Đọc [HUONG-DAN.md](HUONG-DAN.md) — hướng dẫn tiếng Việt,
+> từ cài đặt tới cách chơi, cách tính thắng thua và xử lý lỗi thường gặp.
+> This README is the engineering reference; that file is the user guide.
+
 ---
 
 ## 🧠 Why live web prices via GenLayer, not Chainlink
