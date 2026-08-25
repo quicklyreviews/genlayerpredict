@@ -105,25 +105,32 @@ class PredictMarket(gl.Contract):
 
         # symbol, coingecko_id, horizon_seconds, betting_seconds, fee_bps, min_bet
         #
-        # Only the majors get a 5m market. Every round costs the keeper two
-        # transactions, and a 5m market cycles 2.5x more often than a 15m one —
-        # against the node's 5000-requests-per-day ceiling, putting every coin on
-        # 5m would exhaust the quota before lunchtime. The long tail runs at 15m.
+        # The horizon mix is dictated by the node's request budget, which is the
+        # real constraint on how many markets can run at once. Measured: every
+        # keeper transaction costs four RPC calls (nonce, gas estimate, gas price,
+        # send), each round needs two of them, and the node allows 500 calls an
+        # hour. A 5m market cycles every 8 minutes and a 1h market every 65, so
+        # putting all ten on a short horizon costs roughly twice the entire budget.
+        #
+        # So the majors get the short horizons people actually want to play, and
+        # the long tail runs hourly — which also matches how Polymarket tiers its
+        # own crypto markets (5 Min / 15 Min / 1 Hour / ...). Steady state comes
+        # out near 400 calls an hour, leaving room for browsers and backlogs.
         defaults = [
             ("BTC", "bitcoin", 300, 180, 300, "10000000000000000"),
             ("ETH", "ethereum", 300, 180, 300, "10000000000000000"),
             ("SOL", "solana", 300, 180, 300, "10000000000000000"),
             ("BTC", "bitcoin", 900, 300, 300, "10000000000000000"),
             ("ETH", "ethereum", 900, 300, 300, "10000000000000000"),
-            ("BNB", "binancecoin", 900, 300, 300, "10000000000000000"),
-            ("LINK", "chainlink", 900, 300, 300, "10000000000000000"),
-            ("DOGE", "dogecoin", 900, 300, 300, "10000000000000000"),
-            ("SHIB", "shiba-inu", 900, 300, 300, "10000000000000000"),
-            ("PEPE", "pepe", 900, 300, 300, "10000000000000000"),
+            ("BNB", "binancecoin", 3600, 300, 300, "10000000000000000"),
+            ("LINK", "chainlink", 3600, 300, 300, "10000000000000000"),
+            ("DOGE", "dogecoin", 3600, 300, 300, "10000000000000000"),
+            ("SHIB", "shiba-inu", 3600, 300, 300, "10000000000000000"),
+            ("PEPE", "pepe", 3600, 300, 300, "10000000000000000"),
         ]
         markets: dict = {}
         for sym, cg, horizon, betting, fee, min_bet in defaults:
-            key = f"{sym}-{horizon // 60}m"
+            key = self._market_key(sym, int(horizon))
             markets[key] = {
                 "key": key,
                 "symbol": sym,
@@ -146,6 +153,15 @@ class PredictMarket(gl.Contract):
             return json.loads(s) if s else default
         except Exception:
             return default
+
+    def _market_key(self, symbol: str, horizon_seconds: int) -> str:
+        """Market keys read the way the UI labels them — BTC-5m, BNB-1h — rather
+        than BNB-60m, so an address in a URL matches what the page says."""
+        if horizon_seconds >= 86400:
+            return f"{symbol}-{horizon_seconds // 86400}d"
+        if horizon_seconds >= 3600:
+            return f"{symbol}-{horizon_seconds // 3600}h"
+        return f"{symbol}-{horizon_seconds // 60}m"
 
     def _require_owner(self) -> None:
         if str(gl.message.sender_address).lower() != self.owner:
@@ -306,7 +322,7 @@ class PredictMarket(gl.Contract):
         if not coingecko_id or len(coingecko_id) > 64:
             raise gl.vm.UserError("Invalid coingecko_id")
 
-        key = f"{symbol}-{horizon // 60}m"
+        key = self._market_key(symbol, horizon)
         markets = self._load(self.markets_json, {})
         markets[key] = {
             "key": key,

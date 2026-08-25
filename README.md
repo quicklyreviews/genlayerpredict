@@ -2,7 +2,7 @@
 
 Two crypto trading products on **GenLayer** — the AI-powered blockchain — sharing one frontend and one price engine:
 
-- **GenPredict** (main) — short-horizon **up or down** prediction markets. Pick a coin and a horizon (5m, 15m), back UP or DOWN, and winners split the pool. Parimutuel, like PancakeSwap Prediction, with a market list modelled on Polymarket.
+- **GenPredict** (main) — short-horizon **up or down** prediction markets across eight coins. Pick a coin and a horizon (5m, 15m, 1h), back UP or DOWN, and winners split the pool. Parimutuel, like PancakeSwap Prediction, with a market list modelled on Polymarket.
 - **GenPerp** — a multi-asset **leveraged perpetual-futures** exchange with live PnL, permissionless liquidations, and long/short funding.
 
 Both fetch prices with GenLayer's **Intelligent Contracts** and **Equivalence Principle** — **no Chainlink, no oracle, no admin price input**.
@@ -11,7 +11,7 @@ Both fetch prices with GenLayer's **Intelligent Contracts** and **Equivalence Pr
 |---|---|
 | `index.html` | Market list — filter by horizon and coin, live countdowns and odds |
 | `market.html?m=BTC-5m` | One market — LIVE/NEXT round cards, chart, betting panel, results |
-| `portfolio.html` | Every bet you've made, P&L, and one-click collect |
+| `portfolio.html` | Every bet you've made, P&L, and your play balance |
 | `perp.html` | The leveraged perp terminal |
 
 ---
@@ -35,6 +35,15 @@ start ──betting window──▶ lock ──horizon──▶ close
 ```
 
 The moment a round locks, the following round opens for betting — so you can always place the next bet while the current one plays out. UP wins if `close > lock`, DOWN if `close < lock`.
+
+**Funding is mandatory and works like an exchange account.** You deposit GEN once, and
+your wallet address *is* your account number — attributable without anyone taking custody,
+since only the wallet that owns a balance can move it and no operator key can spend it.
+Bets are staked from that balance, and **winnings are credited straight back into it the
+moment a round settles**. There is no claim step: on a chain that needs a minute to agree
+on anything, making each winner send a second transaction to collect money they already
+won was the worst part of playing, and it silently stranded winnings whenever someone did
+not come back.
 
 **Payouts are parimutuel.** The whole pool minus a 3% fee is split across the winning side in proportion to stake, so the multiplier is only final once betting closes and moves as pools fill — exactly like PancakeSwap Prediction. The UI shows a live estimate and says plainly that it is an estimate.
 
@@ -80,7 +89,12 @@ Nothing is hardcoded to BTC or to one round length. The owner can register or up
 | `funding_k_bps` | Max funding rate per interval at full skew |
 | `min_margin` | Minimum GEN margin to open a position |
 
-BTC, ETH, and SOL ship pre-registered; add more with `add_market(...)`.
+Ten prediction markets ship pre-registered — BTC/ETH/SOL at 5m, BTC/ETH at 15m, and
+BNB/LINK/DOGE/SHIB/PEPE hourly — alongside eight perp markets whose leverage caps scale
+with volatility (20x for majors down to 5x for memecoins, where a routine 10% candle
+would otherwise wipe out a position before a keeper could liquidate it). Add more with
+`add_market(...)`, but read the RPC budget section first: each new short-horizon market
+has a real, measurable cost.
 
 ## 🐛 Bugs the smoke tests caught
 
@@ -168,12 +182,45 @@ npm run fund-vault -- 50
 
 > Trading itself (`open_position`, `close_position`, `fund_vault`) is always signed by the **user's own wallet** in the browser — the backend never spends on a trader's behalf. Its private key is only used for the permissionless keeper actions, and an explicit allowlist rejects anything else.
 
-**RPC budget matters.** GenLayer Studio allows roughly **30 requests per minute**, shared by every browser tab and the keeper — enough to break reads outright if you ignore it. Three things keep the system inside it:
-- the backend caches reads (10s TTL, 2min for market configs), so extra browser tabs cost nothing;
-- the keeper skips any market with no open positions — an idle market costs one cached read per sweep instead of a transaction;
-- the frontend reloads market configs every 10th poll rather than every poll.
+**The RPC budget decides how many markets you can run.** This is the single hardest
+constraint in the project, and it is worth understanding before adding anything.
 
-`KEEPER_INTERVAL_MS` (default 60s) is a direct gas cost: each sweep sends one `touch_price` transaction per market that has open positions.
+The node enforces **500 requests/hour** and **5000/day**, shared by every browser tab,
+both keepers and any script. Exceeding either takes the whole app down until the window
+rolls — an hour, or eight hours. It happened twice while building this.
+
+Measured, not estimated (the backend's RPC meter counts every round trip):
+
+| | cost |
+|---|---|
+| a contract read | **1** call |
+| a keeper transaction | **4** calls — `eth_getTransactionCount`, `eth_estimateGas`, `eth_gasPrice`, `eth_sendRawTransaction` |
+| a round | 2 transactions (lock + resolve) = **8** calls |
+
+That 4x on writes is what makes the budget so tight, and estimating it as 1 is how the
+quota got blown. A 5m market cycles every 8 minutes; an hourly one every 65. Ten markets
+on short horizons costs roughly **twice the entire hourly budget**.
+
+Hence the shipped mix — 5m for BTC/ETH/SOL, 15m for BTC/ETH, 1h for the long tail —
+which lands near **400 calls/hour** with room for browsers and backlogs. The other
+savings that make it fit:
+
+- **The keeper never polls a transaction to completion.** It used to check every 5s for
+  ~70s of consensus: 14 calls per action, ~19k a day on its own. The contract already
+  reports what is outstanding, so a successful action disappears from
+  `get_pending_actions` and a failed one is retried next sweep. Send and forget.
+- **The perp keeper checks one number before reading anything else.** Scanning every
+  market cost one read per market per sweep (~480/hour with the full listing). It now
+  reads total margin locked first and skips the scan entirely when nothing is open.
+- **Browser polling pauses when the tab is hidden**, so a forgotten tab costs nothing,
+  and reads are cached 30s. Countdowns tick locally from timestamps already held, so
+  nothing feels slower.
+
+Watch the real number in the backend log — it reports every five minutes and warns at 450:
+
+```text
+[RPC] 73 calls in 5.0min → ~876/hour of 500  eth_getTransactionCount=13 ...
+```
 
 ### 3. Frontend (Vercel)
 - Host on **Vercel** as a new Project. `vercel.json` sets `"outputDirectory": "frontend"`.
