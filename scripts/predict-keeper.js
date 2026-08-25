@@ -15,7 +15,7 @@
  */
 const { createClient } = require("genlayer-js");
 const { privateKeyToAccount } = require("viem/accounts");
-const { localnet } = require("genlayer-js/chains");
+const { studionet } = require("./chain");
 
 // How long to consider a sent action "in flight" before allowing a retry. Sized to
 // comfortably exceed GenLayer consensus (~70s) so we never double-send.
@@ -28,7 +28,7 @@ class PredictKeeper {
     const pk = privateKey.startsWith("0x") ? privateKey : `0x${privateKey}`;
     this.account = privateKeyToAccount(pk);
     this.client = createClient({
-      chain: { ...localnet, id: 61999 },
+      chain: studionet,
       endpoint: rpcUrl,
       account: this.account,
     });

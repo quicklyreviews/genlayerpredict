@@ -21,7 +21,7 @@ loadEnv();
 
 async function main() {
   const { privateKeyToAccount } = require("viem/accounts");
-  const { localnet } = require("genlayer-js/chains");
+  const { studionet } = require("genlayer-js/chains");
 
   const rpcUrl = process.env.GENLAYER_RPC_URL || "https://studio.genlayer.com/api";
 
@@ -49,7 +49,7 @@ async function main() {
   console.log(`   Current nonce on-chain: ${currentNonce}`);
 
   // GenLayer Studio chain ID = 61999 (0xF22F)
-  const studioChain = { ...localnet, id: 61999 };
+  const studioChain = studionet;
 
   const client = createClient({
     chain: studioChain,

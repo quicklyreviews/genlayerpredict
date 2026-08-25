@@ -90,6 +90,11 @@ class PredictMarket(gl.Contract):
     bets_json: str              # { "BTC-5m": { "7": { "0xaddr": {bet...} } } }
     pointers_json: str          # { "BTC-5m": {"next_id": 8, "live_id": 7, "last_id": 8} }
     history_limit: u256         # resolved rounds kept per market before pruning
+    stakes_json: str            # { "0xaddr": {"principal": wei, "since": ts, "accrued": wei} }
+    staked_principal: u256      # sum of every LP's principal
+    rewards_pool: u256          # owner-funded subsidy that pays LP yield
+    rewards_paid: u256          # lifetime yield actually handed out
+    apy_bps: u256               # LP yield, in basis points per year
 
     # ─── Construction ────────────────────────────────────────────────
 
@@ -99,6 +104,11 @@ class PredictMarket(gl.Contract):
         self.total_bets_placed = u256(0)
         self.total_volume = u256(0)
         self.history_limit = u256(40)
+        self.stakes_json = "{}"
+        self.staked_principal = u256(0)
+        self.rewards_pool = u256(0)
+        self.rewards_paid = u256(0)
+        self.apy_bps = u256(1000)  # 10.00% per year
         self.balances_json = "{}"
         self.balances_total = u256(0)
         self.staked_total = u256(0)
@@ -166,6 +176,67 @@ class PredictMarket(gl.Contract):
     def _require_owner(self) -> None:
         if str(gl.message.sender_address).lower() != self.owner:
             raise gl.vm.UserError("Only owner can call this")
+
+    # ─── Liquidity pool ──────────────────────────────────────────────
+    #
+    # Anyone may stake GEN here and earn a fixed APY, withdrawable at any moment
+    # along with whatever interest has accrued.
+    #
+    # Two things about that promise are worth stating plainly rather than burying:
+    #
+    # 1. The yield is a subsidy, not revenue. It is paid out of rewards_pool, which
+    #    the owner funds deliberately. Trading fees do not fund it and are not
+    #    pretended to. When the subsidy runs dry the contract pays what is left and
+    #    reports a shortfall — it never quietly issues an IOU it cannot honour, and
+    #    get_pool() publishes how many days of runway remain so nobody has to guess.
+    #
+    # 2. Interest accrues per second and is computed only when an account is
+    #    touched, so there is no loop over stakers and no keeper transaction to pay
+    #    for. The arithmetic is deliberately simple interest on the principal, not
+    #    compounding: compounding here would need either a global index or repeated
+    #    settlement, and neither is worth the complexity at these amounts.
+
+    SECONDS_PER_YEAR = 31536000
+
+    def _stake_of(self, stakes: dict, addr: str) -> dict:
+        return stakes.get(addr.lower(), {"principal": "0", "since": 0, "accrued": "0"})
+
+    def _accrue(self, stakes: dict, addr: str) -> dict:
+        """Bring one account's interest up to date. Safe to call repeatedly."""
+        a = addr.lower()
+        st = self._stake_of(stakes, a)
+        principal = int(st["principal"])
+        now = int(time.time())
+        since = int(st.get("since", 0)) or now
+        if principal > 0 and now > since:
+            earned = principal * int(self.apy_bps) * (now - since) // (10000 * self.SECONDS_PER_YEAR)
+            st["accrued"] = str(int(st.get("accrued", "0")) + earned)
+        st["since"] = now
+        st["principal"] = str(principal)
+        stakes[a] = st
+        return st
+
+    def _pending_interest(self, st: dict) -> int:
+        """Interest owed to one account including the part not yet settled, so a
+        view never understates what a staker would receive by withdrawing now."""
+        principal = int(st.get("principal", "0"))
+        now = int(time.time())
+        since = int(st.get("since", 0)) or now
+        live = 0
+        if principal > 0 and now > since:
+            live = principal * int(self.apy_bps) * (now - since) // (10000 * self.SECONDS_PER_YEAR)
+        return int(st.get("accrued", "0")) + live
+
+    def _runway_seconds(self) -> int:
+        """How long the subsidy can keep paying at the current APY and stake size.
+        Published so the shortfall is visible before anyone hits it, not after."""
+        principal = int(self.staked_principal)
+        if principal <= 0 or int(self.apy_bps) <= 0:
+            return -1  # nothing accruing; runway is irrelevant rather than zero
+        per_second = principal * int(self.apy_bps) / (10000 * self.SECONDS_PER_YEAR)
+        if per_second <= 0:
+            return -1
+        return int(int(self.rewards_pool) / per_second)
 
     # ─── Vault ledger ────────────────────────────────────────────────
 
@@ -537,6 +608,154 @@ class PredictMarket(gl.Contract):
             "fee": str(fee),
             "paid_out": str(paid_out),
             "winners": winners,
+        }
+
+    # ─── Liquidity pool: stake / unstake ─────────────────────────────
+
+    @gl.public.write.payable
+    def stake(self) -> dict[str, typing.Any]:
+        """Supply GEN to the pool and start earning the advertised APY.
+
+        Open to anyone, with no lock-up: unstake whenever you like and take the
+        interest earned up to that second with you.
+        """
+        amount = int(gl.message.value)
+        if amount <= 0:
+            raise gl.vm.UserError("Stake must be greater than zero")
+        provider = str(gl.message.sender_address).lower()
+        stakes = self._load(self.stakes_json, {})
+        st = self._accrue(stakes, provider)
+        st["principal"] = str(int(st["principal"]) + amount)
+        stakes[provider] = st
+        self.stakes_json = json.dumps(stakes)
+        self.staked_principal += u256(amount)
+        return {
+            "address": provider,
+            "staked": str(amount),
+            "principal": st["principal"],
+            "apy_bps": int(self.apy_bps),
+            "runway_seconds": self._runway_seconds(),
+        }
+
+    @gl.public.write
+    def unstake(self, amount: u256) -> dict[str, typing.Any]:
+        """Withdraw principal plus everything it has earned.
+
+        Interest comes from the subsidy. If the subsidy has run dry the principal
+        still returns in full and the interest is paid as far as it goes — the
+        shortfall is reported rather than hidden, and the unpaid part stays on the
+        books so a later top-up settles it.
+        """
+        want = int(amount)
+        if want <= 0:
+            raise gl.vm.UserError("Amount must be greater than zero")
+        provider = str(gl.message.sender_address).lower()
+        stakes = self._load(self.stakes_json, {})
+        st = self._accrue(stakes, provider)
+        principal = int(st["principal"])
+        if want > principal:
+            raise gl.vm.UserError(f"You have {principal} wei staked, cannot withdraw {want}")
+
+        # Interest settles in proportion to how much of the stake is leaving, so a
+        # partial exit does not sweep the entire accrued balance.
+        accrued = int(st["accrued"])
+        share = accrued if want == principal else accrued * want // principal
+        payable = min(share, int(self.rewards_pool))
+        shortfall = share - payable
+
+        st["principal"] = str(principal - want)
+        st["accrued"] = str(accrued - share + shortfall)
+        stakes[provider] = st
+        self.stakes_json = json.dumps(stakes)
+        self.staked_principal = u256(max(0, int(self.staked_principal) - want))
+        self.rewards_pool = u256(int(self.rewards_pool) - payable)
+        self.rewards_paid += u256(payable)
+
+        _Recipient(gl.message.sender_address).emit_transfer(value=u256(want + payable))
+        return {
+            "withdrawn_principal": str(want),
+            "interest_paid": str(payable),
+            "interest_unpaid": str(shortfall),
+            "principal_left": st["principal"],
+        }
+
+    @gl.public.write
+    def claim_interest(self) -> dict[str, typing.Any]:
+        """Take the interest without touching the principal."""
+        provider = str(gl.message.sender_address).lower()
+        stakes = self._load(self.stakes_json, {})
+        st = self._accrue(stakes, provider)
+        accrued = int(st["accrued"])
+        if accrued <= 0:
+            raise gl.vm.UserError("No interest has accrued yet")
+        payable = min(accrued, int(self.rewards_pool))
+        if payable <= 0:
+            raise gl.vm.UserError("The reward subsidy is empty — ask the owner to top it up")
+        st["accrued"] = str(accrued - payable)
+        stakes[provider] = st
+        self.stakes_json = json.dumps(stakes)
+        self.rewards_pool = u256(int(self.rewards_pool) - payable)
+        self.rewards_paid += u256(payable)
+        _Recipient(gl.message.sender_address).emit_transfer(value=u256(payable))
+        return {"interest_paid": str(payable), "interest_unpaid": str(accrued - payable)}
+
+    @gl.public.write.payable
+    def fund_rewards(self) -> dict[str, typing.Any]:
+        """Top up the subsidy that pays LP interest. Anyone may contribute, but it
+        is the owner's job: the APY is a promise only this balance can keep."""
+        amount = int(gl.message.value)
+        if amount <= 0:
+            raise gl.vm.UserError("Amount must be greater than zero")
+        self.rewards_pool += u256(amount)
+        return {"rewards_pool": str(self.rewards_pool), "runway_seconds": self._runway_seconds()}
+
+    @gl.public.write
+    def set_apy_bps(self, bps: u256) -> None:
+        """Change the advertised APY. Every staker is settled to this second first,
+        so a rate change never rewrites interest already earned."""
+        self._require_owner()
+        v = int(bps)
+        if v > 10000:
+            raise gl.vm.UserError("An APY above 100% is almost certainly a mistake")
+        stakes = self._load(self.stakes_json, {})
+        for addr in list(stakes.keys()):
+            self._accrue(stakes, addr)
+        self.stakes_json = json.dumps(stakes)
+        self.apy_bps = u256(v)
+
+    @gl.public.view
+    def get_stake(self, addr: str) -> dict[str, typing.Any]:
+        """One provider's position, with interest counted up to this second."""
+        stakes = self._load(self.stakes_json, {})
+        st = self._stake_of(stakes, addr)
+        interest = self._pending_interest(st)
+        return {
+            "address": addr.lower(),
+            "principal": st.get("principal", "0"),
+            "interest": str(interest),
+            "total": str(int(st.get("principal", "0")) + interest),
+            "since": int(st.get("since", 0)),
+            "apy_bps": int(self.apy_bps),
+        }
+
+    @gl.public.view
+    def get_pool(self) -> dict[str, typing.Any]:
+        """The pool's health, including how long the subsidy can keep its promise.
+
+        runway_seconds is the number the owner should watch: at the current stake
+        size and APY, that is how long the reward balance lasts. -1 means nothing
+        is accruing, so the question does not arise.
+        """
+        return {
+            "staked_principal": str(self.staked_principal),
+            "rewards_pool": str(self.rewards_pool),
+            "rewards_paid": str(self.rewards_paid),
+            "apy_bps": int(self.apy_bps),
+            "runway_seconds": self._runway_seconds(),
+            "providers": len(self._load(self.stakes_json, {})),
+            "player_balances": str(self.balances_total),
+            "at_risk_in_rounds": str(self.staked_total),
+            "treasury": str(self.treasury),
         }
 
     # ─── Vault: deposit / withdraw ───────────────────────────────────

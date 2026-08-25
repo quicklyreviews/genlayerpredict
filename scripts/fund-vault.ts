@@ -11,7 +11,7 @@
  */
 import { createClient } from "genlayer-js";
 import { privateKeyToAccount } from "viem/accounts";
-import { localnet } from "genlayer-js/chains";
+import { studionet } from "genlayer-js/chains";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -44,7 +44,7 @@ async function main() {
   const privateKey = (rawPk.startsWith("0x") ? rawPk : `0x${rawPk}`) as `0x${string}`;
   const account = privateKeyToAccount(privateKey);
 
-  const studioChain = { ...localnet, id: 61999 };
+  const studioChain = studionet;
   const client = createClient({ chain: studioChain, endpoint: RPC_URL, account });
 
   const amountWei = BigInt(Math.round(amountGen * 1e18));

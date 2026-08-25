@@ -106,6 +106,151 @@ Each of these was found by running the thing on-chain, not by reading the code:
 4. **Hidden in-flight rounds.** Because the horizon outlasts the betting window, two rounds are normally locked at once, but the contract only tracked the most recent — hiding a round the user had money in. `get_market_detail` now returns every locked round.
 5. **A card that contradicted itself.** A market showing `LIVE` alongside an empty pool reads as broken: the badge described the live round while the numbers came from the next one. Badge and numbers now always describe the same round.
 
+## 🏦 The liquidity pool
+
+Anyone may stake GEN into either contract and earn **10% a year**, accruing per second,
+withdrawable together with the principal at any moment. No lock-up, no epochs, no
+minimum.
+
+```bash
+stake()                 # payable — supply GEN
+unstake(amount)         # principal + the interest it earned
+claim_interest()        # interest only, leave the principal working
+fund_rewards()          # payable — top up the subsidy that pays the yield
+get_stake(addr)         # your position, interest counted to this second
+get_pool()              # pool health, including how long the subsidy lasts
+```
+
+### Where the yield comes from, honestly
+
+**It is a subsidy, not revenue.** Interest is paid from `rewards_pool`, which the owner
+funds deliberately with `fund_rewards()`. Trading fees do not fund it and the contract
+does not pretend they do.
+
+That matters because a fixed APY on an open-ended deposit base is a promise something
+has to keep. Rather than let it fail quietly, the contract publishes
+`runway_seconds` — at the current stake size and rate, how long the subsidy lasts — and
+when it does run out, `unstake` returns the principal **in full**, pays the interest as
+far as the subsidy stretches, and reports `interest_unpaid` instead of issuing an IOU it
+cannot honour. The unpaid remainder stays on the books, so a later top-up settles it.
+
+Interest accrues per second and is calculated only when an account is touched, so there
+is no keeper loop and no transaction cost to earning it. It is simple interest on the
+principal, not compounding: compounding needs either a global index or repeated
+settlement, and neither earns its complexity at these amounts.
+
+### The two pools are not the same
+
+| | GenPredict | GenPerp |
+|---|---|---|
+| What staked capital does | **Nothing.** | **Backs trader PnL.** |
+| Why | Parimutuel — players win from each other, so the contract never needs outside capital to pay a winner | The exchange is the counterparty, so profit is paid out of the vault |
+| Risk to principal | None from trading | **Real** — if traders win more than fees take in, the vault shrinks |
+| Withdrawal limit | Your principal | Capped by free liquidity: margin backing open positions belongs to traders |
+
+Staking into GenPredict is therefore a pure yield position. Staking into GenPerp is
+taking the other side of the traders, which is what the yield is compensating for — and
+why `get_stake` there also reports `withdrawable_now`, which can be less than your
+principal while positions are open.
+
+## 🌐 Studionet only
+
+Everything targets **GenLayer Studionet (chain 61999)** and nothing else. `scripts/chain.js`
+is the single place that decides this: it exports the real `studionet` config from
+genlayer-js and refuses an RPC pointing anywhere but Studionet (a localhost simulator is
+also accepted).
+
+This replaced `{ ...localnet, id: 61999 }` copied across nine files — localnet's config
+with Studionet's chain id bolted on. It worked by coincidence, and it meant an RPC aimed
+at another network would have been trusted without question, transacting against
+whatever contract happened to sit at the same address.
+
+## ⚖️ How a round is decided
+
+The whole question is: *who decided the price, and can they be argued with?* On this
+exchange nobody decides it. There is no oracle, no admin key that can post a number,
+and no off-chain service whose word is taken. The price is fetched by the validators
+themselves, and a round only settles if enough of them independently agree.
+
+### The two prices that matter
+
+A round fixes exactly two numbers, each written by its own on-chain transaction:
+
+```text
+lock_round()      →  lock_price     the price when betting closed
+   ⋯ horizon ⋯
+resolve_round()   →  close_price    the price when the horizon elapsed
+
+close_price >  lock_price   →  UP wins
+close_price <  lock_price   →  DOWN wins
+close_price == lock_price   →  void, everyone refunded in full
+```
+
+Nothing else enters the decision. Not volume, not who bet, not what the pools look
+like — just two timestamps and the prices at them.
+
+### Where each price comes from
+
+Inside `lock_round` and `resolve_round`, the contract runs a **non-deterministic
+block**: code that reaches out to the live web. Every validator executes it
+independently, each making its own HTTP request:
+
+```python
+def leader_fn() -> str:
+    # Binance first, then CoinGecko, then Coinbase.
+    response = gl.nondet.web.get(url)
+    return str(float(json.loads(response.body)[...]))
+```
+
+The leader's answer is proposed, and every other validator runs the same function and
+compares. This is GenLayer's **Equivalence Principle**: the network does not need
+identical results, it needs results that agree within a stated tolerance.
+
+```python
+def validator_fn(leader_result) -> bool:
+    leader_price = float(leader_result.calldata)
+    validator_price = float(leader_fn())
+    return abs(leader_price - validator_price) / abs(leader_price) <= 0.005
+```
+
+**0.5%** is the agreement band. It has to be wider than zero because validators fetch
+at slightly different milliseconds, and wider still because a validator that gets
+rate-limited by Binance falls through to CoinGecko or Coinbase — so two honest
+validators can legitimately be quoting different exchanges. Measured live, those three
+sources sit within about **0.02%** of each other, so the band is roughly 25x wider than
+normal disagreement while remaining far tighter than any move that would change an
+outcome.
+
+If validators cannot agree, the transaction does not settle the round. It fails and is
+retried on the next keeper sweep — a disputed price produces no result rather than a
+wrong one.
+
+### What this rules out
+
+- **The operator cannot set the price.** No method accepts a price as an argument.
+  `lock_round` and `resolve_round` take a market key and nothing else; the number is
+  produced inside consensus.
+- **A single exchange going down cannot decide it.** Three sources are tried in order.
+- **A single lying validator cannot decide it.** Its answer has to survive comparison
+  against everyone else's.
+- **Late bets cannot see the answer.** Betting closes before `lock_round` runs, and the
+  UI stops accepting bets 45 seconds earlier still, because a transaction sent inside
+  that window would not reach consensus in time anyway.
+
+### Checking it yourself
+
+Every settled round keeps both prices and the decision, and the frontend shows them on
+the results table — lock, close, the percentage move, and the winner. The same figures
+come from the contract:
+
+```bash
+get_round(market_key, round_id)   # lock_price, close_price, winner, settlement
+```
+
+`settlement` is `PAID` when a winning side was actually paid, or `VOID` when the round
+was refunded — either because the price finished exactly level, or because one side
+attracted no bets and there was nobody to win from.
+
 ## 🔗 Cross-contract calls: what actually works
 
 A single vault shared by GenPredict and GenPerp needs one contract to call another,

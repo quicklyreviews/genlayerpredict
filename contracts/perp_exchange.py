@@ -63,6 +63,11 @@ class PerpExchange(gl.Contract):
     total_margin_locked: u256    # sum of current margin across all OPEN positions
     protocol_fees_collected: u256
     liquidation_bounty_bps: u256
+    stakes_json: str            # { "0xaddr": {"principal": wei, "since": ts, "accrued": wei} }
+    staked_principal: u256      # sum of every LP's principal, part of vault_balance
+    rewards_pool: u256          # owner-funded subsidy that pays LP yield
+    rewards_paid: u256          # lifetime yield actually handed out
+    apy_bps: u256               # LP yield, in basis points per year
     markets_json: str            # { "BTC": {...}, "ETH": {...}, ... }
     positions_json: str          # { "1": {...}, "2": {...}, ... }
     oi_json: str                 # { "BTC": {"long": "wei", "short": "wei"}, ... }
@@ -79,6 +84,11 @@ class PerpExchange(gl.Contract):
         self.total_margin_locked = u256(0)
         self.protocol_fees_collected = u256(0)
         self.liquidation_bounty_bps = u256(50)  # 0.5% of lost margin, paid to liquidator
+        self.stakes_json = "{}"
+        self.staked_principal = u256(0)
+        self.rewards_pool = u256(0)
+        self.rewards_paid = u256(0)
+        self.apy_bps = u256(1000)  # 10.00% per year
 
         # Leverage caps and maintenance margins are set by how violently each asset
         # moves: the majors tolerate 20x, memecoins get a fraction of that and a
@@ -211,6 +221,209 @@ class PerpExchange(gl.Contract):
         cache = self._load(self.price_cache_json, {})
         cache[symbol] = {"price": str(price), "ts": int(time.time())}
         self.price_cache_json = json.dumps(cache)
+
+    # ─── Liquidity pool ──────────────────────────────────────────────
+    #
+    # Here the LPs are doing real work. This exchange is the counterparty to every
+    # trade, so trader profit is paid out of the vault and staked capital is what
+    # makes that possible — unlike the parimutuel prediction market, where players
+    # win from each other and outside liquidity would just sit there.
+    #
+    # Two consequences follow, and both are enforced below:
+    #
+    # 1. Staked principal is part of vault_balance and genuinely at risk. If traders
+    #    win more than the fees take in, the vault shrinks and there is less to go
+    #    round. Withdrawals are therefore capped at what the vault can actually free
+    #    without touching margin belonging to open positions.
+    # 2. The APY is a subsidy paid from rewards_pool, which the owner funds. Trading
+    #    fees do not fund it and are not pretended to. When it runs dry the contract
+    #    pays what remains and reports the shortfall rather than issuing an IOU it
+    #    cannot honour; get_pool() publishes the remaining runway.
+
+    SECONDS_PER_YEAR = 31536000
+
+    def _stake_of(self, stakes: dict, addr: str) -> dict:
+        return stakes.get(addr.lower(), {"principal": "0", "since": 0, "accrued": "0"})
+
+    def _accrue(self, stakes: dict, addr: str) -> dict:
+        """Bring one account's interest up to date. Safe to call repeatedly."""
+        a = addr.lower()
+        st = self._stake_of(stakes, a)
+        principal = int(st["principal"])
+        now = int(time.time())
+        since = int(st.get("since", 0)) or now
+        if principal > 0 and now > since:
+            earned = principal * int(self.apy_bps) * (now - since) // (10000 * self.SECONDS_PER_YEAR)
+            st["accrued"] = str(int(st.get("accrued", "0")) + earned)
+        st["since"] = now
+        st["principal"] = str(principal)
+        stakes[a] = st
+        return st
+
+    def _pending_interest(self, st: dict) -> int:
+        principal = int(st.get("principal", "0"))
+        now = int(time.time())
+        since = int(st.get("since", 0)) or now
+        live = 0
+        if principal > 0 and now > since:
+            live = principal * int(self.apy_bps) * (now - since) // (10000 * self.SECONDS_PER_YEAR)
+        return int(st.get("accrued", "0")) + live
+
+    def _runway_seconds(self) -> int:
+        principal = int(self.staked_principal)
+        if principal <= 0 or int(self.apy_bps) <= 0:
+            return -1
+        per_second = principal * int(self.apy_bps) / (10000 * self.SECONDS_PER_YEAR)
+        if per_second <= 0:
+            return -1
+        return int(int(self.rewards_pool) / per_second)
+
+    @gl.public.write.payable
+    def stake(self) -> dict[str, typing.Any]:
+        """Supply GEN to back trader PnL and earn the advertised APY.
+
+        The stake joins vault_balance, so it is genuinely exposed to trader profit
+        and loss — this is not a savings account with a yield bolted on.
+        """
+        amount = int(gl.message.value)
+        if amount <= 0:
+            raise gl.vm.UserError("Stake must be greater than zero")
+        provider = str(gl.message.sender_address).lower()
+        stakes = self._load(self.stakes_json, {})
+        st = self._accrue(stakes, provider)
+        st["principal"] = str(int(st["principal"]) + amount)
+        stakes[provider] = st
+        self.stakes_json = json.dumps(stakes)
+        self.staked_principal += u256(amount)
+        self.vault_balance += u256(amount)
+        return {
+            "address": provider,
+            "staked": str(amount),
+            "principal": st["principal"],
+            "apy_bps": int(self.apy_bps),
+            "runway_seconds": self._runway_seconds(),
+        }
+
+    @gl.public.write
+    def unstake(self, amount: u256) -> dict[str, typing.Any]:
+        """Withdraw principal plus interest earned.
+
+        Capped by what the vault can free: margin backing open positions belongs to
+        traders, and letting an LP withdraw against it would leave a position that
+        cannot be paid out. Wait for positions to close, or withdraw less.
+        """
+        want = int(amount)
+        if want <= 0:
+            raise gl.vm.UserError("Amount must be greater than zero")
+        provider = str(gl.message.sender_address).lower()
+        stakes = self._load(self.stakes_json, {})
+        st = self._accrue(stakes, provider)
+        principal = int(st["principal"])
+        if want > principal:
+            raise gl.vm.UserError(f"You have {principal} wei staked, cannot withdraw {want}")
+
+        free = int(self.vault_balance) - int(self.total_margin_locked)
+        if want > free:
+            raise gl.vm.UserError(
+                f"Only {max(0, free)} wei is free right now — the rest is margin backing "
+                f"open positions. Try a smaller amount or wait for positions to close."
+            )
+
+        accrued = int(st["accrued"])
+        share = accrued if want == principal else accrued * want // principal
+        payable = min(share, int(self.rewards_pool))
+        shortfall = share - payable
+
+        st["principal"] = str(principal - want)
+        st["accrued"] = str(accrued - share + shortfall)
+        stakes[provider] = st
+        self.stakes_json = json.dumps(stakes)
+        self.staked_principal = u256(max(0, int(self.staked_principal) - want))
+        self.vault_balance = u256(max(0, int(self.vault_balance) - want))
+        self.rewards_pool = u256(int(self.rewards_pool) - payable)
+        self.rewards_paid += u256(payable)
+
+        _Recipient(gl.message.sender_address).emit_transfer(value=u256(want + payable))
+        return {
+            "withdrawn_principal": str(want),
+            "interest_paid": str(payable),
+            "interest_unpaid": str(shortfall),
+            "principal_left": st["principal"],
+        }
+
+    @gl.public.write
+    def claim_interest(self) -> dict[str, typing.Any]:
+        """Take the interest without touching the principal."""
+        provider = str(gl.message.sender_address).lower()
+        stakes = self._load(self.stakes_json, {})
+        st = self._accrue(stakes, provider)
+        accrued = int(st["accrued"])
+        if accrued <= 0:
+            raise gl.vm.UserError("No interest has accrued yet")
+        payable = min(accrued, int(self.rewards_pool))
+        if payable <= 0:
+            raise gl.vm.UserError("The reward subsidy is empty — ask the owner to top it up")
+        st["accrued"] = str(accrued - payable)
+        stakes[provider] = st
+        self.stakes_json = json.dumps(stakes)
+        self.rewards_pool = u256(int(self.rewards_pool) - payable)
+        self.rewards_paid += u256(payable)
+        _Recipient(gl.message.sender_address).emit_transfer(value=u256(payable))
+        return {"interest_paid": str(payable), "interest_unpaid": str(accrued - payable)}
+
+    @gl.public.write.payable
+    def fund_rewards(self) -> dict[str, typing.Any]:
+        """Top up the subsidy that pays LP interest. Kept separate from the vault so
+        yield can never be mistaken for capital backing trader payouts."""
+        amount = int(gl.message.value)
+        if amount <= 0:
+            raise gl.vm.UserError("Amount must be greater than zero")
+        self.rewards_pool += u256(amount)
+        return {"rewards_pool": str(self.rewards_pool), "runway_seconds": self._runway_seconds()}
+
+    @gl.public.write
+    def set_apy_bps(self, bps: u256) -> None:
+        """Change the advertised APY. Every staker is settled to this second first,
+        so a rate change never rewrites interest already earned."""
+        self._require_owner()
+        v = int(bps)
+        if v > 10000:
+            raise gl.vm.UserError("An APY above 100% is almost certainly a mistake")
+        stakes = self._load(self.stakes_json, {})
+        for addr in list(stakes.keys()):
+            self._accrue(stakes, addr)
+        self.stakes_json = json.dumps(stakes)
+        self.apy_bps = u256(v)
+
+    @gl.public.view
+    def get_stake(self, addr: str) -> dict[str, typing.Any]:
+        stakes = self._load(self.stakes_json, {})
+        st = self._stake_of(stakes, addr)
+        interest = self._pending_interest(st)
+        free = max(0, int(self.vault_balance) - int(self.total_margin_locked))
+        return {
+            "address": addr.lower(),
+            "principal": st.get("principal", "0"),
+            "interest": str(interest),
+            "total": str(int(st.get("principal", "0")) + interest),
+            "withdrawable_now": str(min(int(st.get("principal", "0")), free)),
+            "since": int(st.get("since", 0)),
+            "apy_bps": int(self.apy_bps),
+        }
+
+    @gl.public.view
+    def get_pool(self) -> dict[str, typing.Any]:
+        return {
+            "staked_principal": str(self.staked_principal),
+            "rewards_pool": str(self.rewards_pool),
+            "rewards_paid": str(self.rewards_paid),
+            "apy_bps": int(self.apy_bps),
+            "runway_seconds": self._runway_seconds(),
+            "providers": len(self._load(self.stakes_json, {})),
+            "vault_balance": str(self.vault_balance),
+            "margin_locked": str(self.total_margin_locked),
+            "free_liquidity": str(max(0, int(self.vault_balance) - int(self.total_margin_locked))),
+        }
 
     # ─── Admin: market registry & vault ─────────────────────────────
 

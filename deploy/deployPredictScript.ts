@@ -17,7 +17,7 @@ loadEnv();
 
 async function main() {
   const { privateKeyToAccount } = require("viem/accounts");
-  const { localnet } = require("genlayer-js/chains");
+  const { studionet } = require("genlayer-js/chains");
 
   const rpcUrl = process.env.GENLAYER_RPC_URL || "https://studio.genlayer.com/api";
   const rawPk = process.env.PRIVATE_KEY || "";
@@ -35,7 +35,7 @@ async function main() {
   const currentNonce = parseInt(((await nonceRes.json()) as any).result, 16);
   console.log(`   Current nonce on-chain: ${currentNonce}`);
 
-  const client = createClient({ chain: { ...localnet, id: 61999 }, endpoint: rpcUrl, account });
+  const client = createClient({ chain: studionet, endpoint: rpcUrl, account });
 
   const contractPath = path.resolve(__dirname, "../contracts/predict_market.py");
   const contractCode = fs.readFileSync(contractPath, "utf-8").replace(/\r\n/g, "\n");

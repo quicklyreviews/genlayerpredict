@@ -17,7 +17,8 @@
     "keeper": "node scripts/predict-keeper.js",
     "keeper:perp": "tsx scripts/perp-keeper.ts",
     "backend": "node scripts/backend-proxy.js",
-    "coins": "node scripts/fetch-coins.js"
+    "coins": "node scripts/fetch-coins.js",
+    "smoke:pool": "tsx scripts/pool-smoke-test.ts"
   },
   "keywords": [],
   "author": "",

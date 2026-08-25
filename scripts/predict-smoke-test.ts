@@ -18,7 +18,7 @@
  */
 import { createClient } from "genlayer-js";
 import { privateKeyToAccount } from "viem/accounts";
-import { localnet } from "genlayer-js/chains";
+import { studionet } from "genlayer-js/chains";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -41,7 +41,7 @@ if (!A) { console.error("PREDICT_CONTRACT_ADDRESS not set"); process.exit(1); }
 
 const rawPk = process.env.PRIVATE_KEY || "";
 const account = privateKeyToAccount((rawPk.startsWith("0x") ? rawPk : `0x${rawPk}`) as `0x${string}`);
-const client = createClient({ chain: { ...localnet, id: 61999 } as any, endpoint: RPC, account });
+const client = createClient({ chain: studionet as any, endpoint: RPC, account });
 
 const MARKET = process.argv[2] || "BTC-5m";
 const STAKE_GEN = parseFloat(process.argv[3] || "1");

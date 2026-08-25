@@ -3,7 +3,7 @@ const fs = require("fs");
 const path = require("path");
 const { createClient } = require("genlayer-js");
 const { privateKeyToAccount } = require("viem/accounts");
-const { localnet } = require("genlayer-js/chains");
+const { studionet, resolveRpc, assertStudionet } = require("./chain");
 
 // Manually parse .env to avoid dotenv v17 corruption
 function loadEnv() {
@@ -26,7 +26,10 @@ loadEnv();
 const { PredictKeeper } = require("./predict-keeper");
 
 const PORT = process.env.PORT || 3005;
-const RPC_URL = process.env.GENLAYER_RPC_URL || "https://studio.genlayer.com/api";
+// Throws at startup if pointed anywhere but Studionet — the contracts live there,
+// and a keeper aimed at another network would transact against whatever happens to
+// sit at the same address.
+const RPC_URL = resolveRpc();
 const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS || "";
 const PREDICT_ADDRESS = process.env.PREDICT_CONTRACT_ADDRESS || "";
 const PREDICT_KEEPER_INTERVAL_MS = parseInt(process.env.PREDICT_KEEPER_INTERVAL_MS || "60000", 10);
@@ -67,7 +70,7 @@ setInterval(() => {
   if (perHour > 450) console.warn(`[RPC] ⚠ approaching the hourly cap`);
 }, 300000);
 
-const studioChain = { ...localnet, id: 61999 };
+const studioChain = studionet;
 const client = createClient({ chain: studioChain, endpoint: RPC_URL, account });
 
 // Writes exposed through the public HTTP API are keeper-only actions — they are
@@ -338,8 +341,10 @@ async function startKeeper() {
   }, KEEPER_INTERVAL_MS);
 }
 
-server.listen(PORT, () => {
+server.listen(PORT, async () => {
   console.log(`🔌 GenPredict backend running at http://localhost:${PORT}`);
+  const onStudio = await assertStudionet(RPC_URL);
+  console.log(`   Chain:    Studionet (61999)${onStudio === false ? " ⚠ NODE REPORTS A DIFFERENT CHAIN" : ""}`);
   console.log(`   Account:  ${account.address}`);
   console.log(`   Predict:  ${PREDICT_ADDRESS || "(not set)"}`);
   console.log(`   Perp:     ${CONTRACT_ADDRESS || "(not set)"}`);
