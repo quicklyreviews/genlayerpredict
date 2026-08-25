@@ -22,11 +22,20 @@ let submitting = false;
 
 const now = () => Math.floor(Date.now() / 1000);
 
+/** A round with no stake on it never locks — the keeper leaves it alone so idle
+ *  markets cost nothing — so it stays bettable indefinitely, and the first bet
+ *  restarts the window. Returns Infinity for that case. */
+function isDormant(round) {
+  return round && round.status === "OPEN"
+    && BigInt(round.up_pool || "0") + BigInt(round.down_pool || "0") === 0n;
+}
+
 /** Seconds left in which a bet can still realistically be included. GenLayer needs
- *  about a minute of consensus, so we stop accepting well before the actual lock
- *  rather than letting people pay gas for a bet that cannot land. */
+ *  about a minute of consensus, so we stop accepting well before the lock rather
+ *  than letting someone pay gas for a bet that cannot land. */
 function bettableSeconds(round) {
   if (!round || round.status !== "OPEN") return -1;
+  if (isDormant(round)) return Infinity;
   return round.lock_ts - now() - CONSENSUS_BUFFER_SECONDS;
 }
 
@@ -112,7 +121,14 @@ function nextCard(r) {
   const left = bettableSeconds(r);
   const untilLock = r.lock_ts - now();
   let cd, note = "";
-  if (left > 0) {
+  if (isDormant(r)) {
+    cd = `<div class="countdown">
+            <div class="countdown__value">—</div>
+            <div class="countdown__label">waiting for the first bet</div></div>`;
+    note = `<div class="notice notice--info"><span>▶</span><span>Nobody has staked this round yet,
+            so the clock has not started. Your bet starts it — everyone then gets the full
+            betting window to take the other side.</span></div>`;
+  } else if (left > 0) {
     cd = `<div class="countdown${left < 60 ? " countdown--urgent" : ""}">
             <div class="countdown__value">${fmtCountdown(left)}</div>
             <div class="countdown__label">left to bet</div></div>`;
@@ -247,6 +263,7 @@ function panelSignature() {
     selectedSide ?? "noside",
     submitting ? "busy" : "idle",
     vaultState.balance === 0n ? "unfunded" : "funded",
+    isDormant(detail?.next_round) ? "dormant" : "timed",
   ].join("|");
 }
 
@@ -388,11 +405,17 @@ function renderBetPanel() {
       ${submitting ? "Confirming…" : selectedSide ? `Bet ${stake} GEN on ${selectedSide}` : "Pick UP or DOWN"}
     </button>
 
-    <div class="notice notice--warn" style="margin-top:10px">
-      <span>⏱</span>
-      <span>Closes in <b data-tick-countdown>${fmtCountdown(left)}</b>. GenLayer needs about a minute to reach
-      consensus, so bet early — we stop accepting ${CONSENSUS_BUFFER_SECONDS}s before the lock.</span>
-    </div>`;
+    ${isDormant(round) ? `
+      <div class="notice notice--info" style="margin-top:10px">
+        <span>▶</span>
+        <span>This round has no bets yet, so there is no deadline — placing one starts a
+        fresh ${Math.round(detail.market.betting_seconds / 60)} minute betting window.</span>
+      </div>` : `
+      <div class="notice notice--warn" style="margin-top:10px">
+        <span>⏱</span>
+        <span>Closes in <b data-tick-countdown>${fmtCountdown(left)}</b>. GenLayer needs about a minute to
+        reach consensus, so bet early — we stop accepting ${CONSENSUS_BUFFER_SECONDS}s before the lock.</span>
+      </div>`}`;
 
   // Wire up
   const stakeInput = $("stake");

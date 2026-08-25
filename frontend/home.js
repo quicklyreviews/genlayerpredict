@@ -19,10 +19,20 @@ let myBets = [];
 
 // ─── Rendering ──────────────────────────────────────────────────────
 
-/** A round is only bettable while there is enough time left for a transaction to
- *  reach consensus — otherwise the user pays gas for a bet that cannot land. */
+/** A round with no stake on it never locks — the keeper leaves it alone so idle
+ *  markets cost nothing — so it stays bettable indefinitely, and the first bet
+ *  restarts the window. Returns Infinity for that case. */
+function isDormant(round) {
+  return round && round.status === "OPEN"
+    && BigInt(round.up_pool || "0") + BigInt(round.down_pool || "0") === 0n;
+}
+
+/** Seconds left in which a bet can still realistically be included. GenLayer needs
+ *  about a minute of consensus, so we stop accepting well before the lock rather
+ *  than letting someone pay gas for a bet that cannot land. */
 function bettableSeconds(round) {
   if (!round || round.status !== "OPEN") return -1;
+  if (isDormant(round)) return Infinity;
   return round.lock_ts - Math.floor(Date.now() / 1000) - CONSENSUS_BUFFER_SECONDS;
 }
 
@@ -34,6 +44,9 @@ function bettableSeconds(round) {
 function featuredRound(m) {
   const next = m.next_round;
   const live = m.live_round;
+  if (next && isDormant(next) && !(live && live.status === "LOCKED")) {
+    return { round: next, phase: "waiting", left: 0 };
+  }
   if (next && bettableSeconds(next) > 0) {
     return { round: next, phase: "open", left: bettableSeconds(next) };
   }
@@ -45,6 +58,7 @@ function featuredRound(m) {
 }
 
 function phasePill(f) {
+  if (f.phase === "waiting") return `<span class="pill pill--open">Open</span>`;
   if (f.phase === "open") return `<span class="pill pill--open">Open ${fmtCountdown(f.left)}</span>`;
   if (f.phase === "live") return `<span class="pill pill--live"><span class="dot-live"></span>Live ${fmtCountdown(f.left)}</span>`;
   if (f.phase === "locking") return `<span class="pill pill--closing">Locking</span>`;
@@ -63,7 +77,7 @@ function marketCard(m) {
 
   const probBlock = pct === null
     ? `<div class="prob">
-         <span class="prob__side">${f.phase === "open" ? "First bet wins the pool" : "No bets this round"}</span>
+         <span class="prob__side">${f.phase === "waiting" ? "Your bet starts the clock" : f.phase === "open" ? "First bet wins the pool" : "No bets this round"}</span>
          <span class="prob__pct" style="color:var(--text-muted)">—</span></div>${bar}`
     : `<div class="prob">
          <span class="prob__side prob__side--up">▲ UP</span>
@@ -152,8 +166,9 @@ function renderGrid() {
     // sorting purely by lock time would bury them under rounds already locked.
     list.sort((a, b) => {
       const fa = featuredRound(a), fb = featuredRound(b);
-      const openA = fa.phase === "open" ? 0 : 1;
-      const openB = fb.phase === "open" ? 0 : 1;
+      const rank = (p) => (p === "open" ? 0 : p === "waiting" ? 1 : 2);
+      const openA = rank(fa.phase);
+      const openB = rank(fb.phase);
       if (openA !== openB) return openA - openB;
       return fa.left - fb.left;
     });

@@ -197,13 +197,25 @@ Measured, not estimated (the backend's RPC meter counts every round trip):
 | a keeper transaction | **4** calls — `eth_getTransactionCount`, `eth_estimateGas`, `eth_gasPrice`, `eth_sendRawTransaction` |
 | a round | 2 transactions (lock + resolve) = **8** calls |
 
-That 4x on writes is what makes the budget so tight, and estimating it as 1 is how the
-quota got blown. A 5m market cycles every 8 minutes; an hourly one every 65. Ten markets
-on short horizons costs roughly **twice the entire hourly budget**.
+That 4x on writes is what makes the budget tight, and assuming it was 1 is how the quota
+first got blown.
 
-Hence the shipped mix — 5m for BTC/ETH/SOL, 15m for BTC/ETH, 1h for the long tail —
-which lands near **400 calls/hour** with room for browsers and backlogs. The other
-savings that make it fit:
+The second, larger mistake was assuming the horizon set the pace. It does not: **a new
+round opens every time the previous one locks**, so the cadence comes from the *betting
+window*, not the horizon. An hourly market was still opening a round every five minutes,
+which is why moving the long tail from 15m to 1h barely helped — 876 calls/hour became
+750.
+
+The real problem was that **a market nobody was playing still cycled forever**, burning
+two transactions per betting window whether or not a single bet existed. So now:
+
+- **A round with no stake on it never locks.** The keeper skips it, it simply waits, and
+  it costs nothing. The first bet wakes it up and restarts the betting window from that
+  moment, so whoever wants the other side still gets a full window to take it.
+
+An idle market therefore costs **zero transactions**, and cost scales with how much
+people actually play rather than with how many markets are listed — which is what makes
+listing eight coins affordable at all. The other savings:
 
 - **The keeper never polls a transaction to completion.** It used to check every 5s for
   ~70s of consensus: 14 calls per action, ~19k a day on its own. The contract already

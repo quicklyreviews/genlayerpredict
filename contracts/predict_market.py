@@ -604,8 +604,18 @@ class PredictMarket(gl.Contract):
             raise gl.vm.UserError("No round is open for betting")
 
         now = int(time.time())
+        # A round nobody has bet on never locks — see get_pending_actions. It simply
+        # waits, costing the keeper nothing, which is what lets the exchange list
+        # markets that are quiet most of the time. The first bet wakes it up, and the
+        # betting window restarts from this moment so whoever wants the other side
+        # still gets a fair chance to take it.
+        dormant = int(rnd["up_pool"]) + int(rnd["down_pool"]) == 0
         if now >= int(rnd["lock_ts"]):
-            raise gl.vm.UserError("Betting has closed for this round")
+            if not dormant:
+                raise gl.vm.UserError("Betting has closed for this round")
+            rnd["lock_ts"] = now + int(market["betting_seconds"])
+            rnd["close_ts"] = rnd["lock_ts"] + int(market["horizon_seconds"])
+            rnd["start_ts"] = now
 
         stake = int(amount)
         if stake < int(market["min_bet"]):
@@ -910,7 +920,16 @@ class PredictMarket(gl.Contract):
     @gl.public.view
     def get_pending_actions(self) -> str:
         """What the keeper should do right now, decided on-chain in a single call:
-        which markets need starting, locking, or resolving."""
+        which markets need starting, locking, or resolving.
+
+        Rounds nobody has bet on are deliberately left alone. A new round opens
+        every time the previous one locks, so a market that cycles regardless of
+        interest costs two transactions per betting window forever — measured at
+        four RPC calls each, ten idle markets came to more than the node's entire
+        hourly allowance. Leaving an empty round open costs nothing, and bet()
+        restarts its window when the first stake arrives, so an idle market is free
+        and a busy one behaves exactly as before.
+        """
         markets = self._load(self.markets_json, {})
         rounds = self._load(self.rounds_json, {})
         pointers = self._load(self.pointers_json, {})
@@ -924,7 +943,7 @@ class PredictMarket(gl.Contract):
             nxt = mrounds.get(str(ptr.get("next_id", 0)))
             if not nxt or nxt.get("status") != "OPEN":
                 actions.append({"action": "start_round", "market": key, "round_id": 0})
-            elif now >= int(nxt["lock_ts"]):
+            elif now >= int(nxt["lock_ts"]) and int(nxt["up_pool"]) + int(nxt["down_pool"]) > 0:
                 actions.append({"action": "lock_round", "market": key, "round_id": int(nxt["id"])})
             for rid, rnd in mrounds.items():
                 if rnd.get("status") == "LOCKED" and now >= int(rnd["close_ts"]):
