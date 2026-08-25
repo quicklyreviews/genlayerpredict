@@ -21,6 +21,30 @@ const { studionet } = require("./chain");
 // comfortably exceed GenLayer consensus (~70s) so we never double-send.
 const CONSENSUS_GRACE_MS = 150000;
 
+/**
+ * Most actions one sweep will send.
+ *
+ * The contract reports everything that is due at once, and the keeper used to send
+ * all of it. On a freshly deployed contract that means ten markets needing their
+ * first round in the same tick — forty RPC calls in a few seconds, against a node
+ * that allows five hundred an hour. The meter read 828/hour and warned it was near
+ * the cap, and while the node is throttling, ordinary reads fail too: the play
+ * balance in the header cannot load and shows "retry". Restarting the backend was
+ * enough to trigger it, which is exactly when a user is looking at the page.
+ *
+ * Four per sweep, once a minute, drains any backlog within a few minutes while
+ * leaving the hourly budget intact. Nothing is lost by waiting: the contract still
+ * reports the rest as pending, and the next sweep picks them up.
+ */
+const MAX_ACTIONS_PER_SWEEP = 4;
+
+/**
+ * Lower sorts first. When the cap defers work, it must defer the least urgent:
+ * resolving a round is holding somebody's money, locking one has bettors waiting on
+ * it, and starting one only opens a market nobody has staked on yet.
+ */
+const ACTION_PRIORITY = { resolve_round: 0, lock_round: 1, start_round: 2 };
+
 class PredictKeeper {
   constructor({ rpcUrl, privateKey, contractAddress, log = console.log }) {
     this.contractAddress = contractAddress;
@@ -110,9 +134,21 @@ class PredictKeeper {
       if (now - startedAt > 8 * 60 * 1000) this.inFlight.delete(k);
     }
 
-    for (const action of actions) {
+    // Urgent work first, then cap the burst. The contract lists actions grouped by
+    // market, so without sorting a cap would strand the last markets' resolutions
+    // behind the first markets' round openings.
+    const ready = actions
+      .filter((a) => !this.inFlight.has(this.key(a)))
+      .sort((a, b) => (ACTION_PRIORITY[a.action] ?? 9) - (ACTION_PRIORITY[b.action] ?? 9));
+    const due = ready.slice(0, MAX_ACTIONS_PER_SWEEP);
+    if (ready.length > due.length) {
+      // Say what was held back rather than letting a cap look like completion.
+      this.log(`[PREDICT] ${ready.length} actions due, sending ${due.length} this sweep ` +
+               `(${ready.length - due.length} deferred to stay inside the RPC budget)`);
+    }
+
+    for (const action of due) {
       const k = this.key(action);
-      if (this.inFlight.has(k)) continue;
       const label = `${action.action}(${action.market}${action.round_id ? ` #${action.round_id}` : ""})`;
       this.inFlight.set(k, Date.now());
       try {
