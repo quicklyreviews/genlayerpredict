@@ -11,7 +11,8 @@ Both fetch prices with GenLayer's **Intelligent Contracts** and **Equivalence Pr
 |---|---|
 | `index.html` | Market list — filter by horizon and coin, live countdowns and odds |
 | `market.html?m=BTC-5m` | One market — LIVE/NEXT round cards, chart, betting panel, results |
-| `portfolio.html` | Every bet you've made, P&L, and your play balance |
+| `portfolio.html` | Your history — every round joined, how it ended, what is still uncollected |
+| `pool.html` | Earn — supply GEN to either pool at 10% a year, counted per second |
 | `perp.html` | The leveraged perp terminal |
 
 > **Chỉ muốn dùng thử?** Đọc [HUONG-DAN.md](HUONG-DAN.md) — hướng dẫn tiếng Việt,
@@ -43,11 +44,14 @@ The moment a round locks, the following round opens for betting — so you can a
 **Funding is mandatory and works like an exchange account.** You deposit GEN once, and
 your wallet address *is* your account number — attributable without anyone taking custody,
 since only the wallet that owns a balance can move it and no operator key can spend it.
-Bets are staked from that balance, and **winnings are credited straight back into it the
-moment a round settles**. There is no claim step: on a chain that needs a minute to agree
-on anything, making each winner send a second transaction to collect money they already
-won was the worst part of playing, and it silently stranded winnings whenever someone did
-not come back.
+Bets are staked from that balance, and **winnings are collected with a transaction you
+sign**. This went back and forth. Crediting automatically at settlement is friendlier —
+on a chain that needs a minute to agree on anything, a second transaction to collect
+money you already won is the worst part of playing — but it makes a win something that
+happens to you rather than something you take, and the product owner asked for the
+explicit step. Two things blunt the cost: `claim_all()` settles every outstanding win in
+one transaction, and `_prune()` refuses to drop a round that still holds an uncollected
+win, however old, so nothing is stranded by not coming back.
 
 **Payouts are parimutuel.** The whole pool minus a 3% fee is split across the winning side in proportion to stake, so the multiplier is only final once betting closes and moves as pools fill — exactly like PancakeSwap Prediction. The UI shows a live estimate and says plainly that it is an estimate.
 
@@ -304,9 +308,12 @@ npm run deploy
 ├── frontend/
 │   ├── index.html / home.js    # Market list
 │   ├── market.html / market.js # One market: rounds, chart, betting
-│   ├── portfolio.html / .js    # Your bets across all markets
+│   ├── portfolio.html / .js    # History: rounds joined, outcomes, collection state
+│   ├── pool.html / pool.js     # Earn: supply and withdraw from either pool
 │   ├── perp.html / perp-app.js # Leveraged perp terminal
-│   ├── shared.js               # Wallet, config, formatting, toasts
+│   ├── results.js              # Announces wins/losses/refunds; the collect banner
+│   ├── session.js              # Optional burner key for signature-free betting
+│   ├── shared.js               # Wallet, config, formatting, toasts, polling
 │   └── styles.css              # Design system
 ├── deploy/
 │   ├── deployPredictScript.ts  # Deploys predict_market.py
