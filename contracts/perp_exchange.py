@@ -54,6 +54,37 @@ class PerpExchange(gl.Contract):
       - Liquidation is permissionless — anyone can call liquidate_position
         on an under-margined position and earn a bounty. This is what
         replaces a centralized liquidation engine.
+      - Open interest per market is capped against the capital backing it
+        (see oi_cap_bps). Without that the exchange accepts positions it
+        cannot settle, and the trader only discovers it when taking profit.
+      - Fees are charged on entry and on exit, as on a real venue. Charging
+        only on entry understates the cost of a round trip by half.
+
+    WHERE THIS DIFFERS FROM A PRODUCTION VENUE
+
+    Worth knowing before treating any of it as battle-tested:
+
+      - **Spot price, not a mark price.** Real perps liquidate against a mark
+        price — an index blended with the funding basis, often median-filtered
+        — precisely so a brief wick on one exchange cannot trigger
+        liquidations. Here liquidation uses the same consensus spot price as
+        everything else. The 0.5% agreement band across three sources absorbs
+        ordinary noise, but a genuine cross-exchange move is taken at face
+        value.
+      - **Funding follows open-interest skew, not the premium.** A real perp
+        derives funding from the gap between perp price and index, which is
+        what actually tethers the two. With no order book here there is no
+        perp price to compare, so skew stands in for it: it pushes one-sided
+        books back toward balance, which is the same intent by a cruder route.
+      - **No insurance fund.** When price gaps past a liquidation the position
+        can be worth less than zero. A real venue absorbs that in an insurance
+        fund; here it lands on the vault, and any payout the vault cannot meet
+        is recorded in bad_debt rather than being quietly shrunk.
+      - **No partial liquidation.** Positions are closed whole. Real venues
+        often close part of a position to bring it back above maintenance,
+        which is gentler on the trader.
+      - **No order book, no slippage, no price impact.** Every fill is at the
+        consensus price regardless of size, bounded only by the OI cap.
     """
 
     owner: str
@@ -68,6 +99,8 @@ class PerpExchange(gl.Contract):
     rewards_pool: u256          # owner-funded subsidy that pays LP yield
     rewards_paid: u256          # lifetime yield actually handed out
     apy_bps: u256               # LP yield, in basis points per year
+    oi_cap_bps: u256            # max open interest per market, as bps of free vault liquidity
+    bad_debt: u256              # payouts the vault could not cover, owed and recorded
     markets_json: str            # { "BTC": {...}, "ETH": {...}, ... }
     positions_json: str          # { "1": {...}, "2": {...}, ... }
     oi_json: str                 # { "BTC": {"long": "wei", "short": "wei"}, ... }
@@ -89,6 +122,10 @@ class PerpExchange(gl.Contract):
         self.rewards_pool = u256(0)
         self.rewards_paid = u256(0)
         self.apy_bps = u256(1000)  # 10.00% per year
+        # Real venues cap open interest against the capital backing it. 3x free
+        # liquidity is deliberately conservative for a vault this small.
+        self.oi_cap_bps = u256(30000)  # 3.00x
+        self.bad_debt = u256(0)
 
         # Leverage caps and maintenance margins are set by how violently each asset
         # moves: the majors tolerate 20x, memecoins get a fraction of that and a
@@ -502,6 +539,36 @@ class PerpExchange(gl.Contract):
         self.vault_balance -= u256(amt)
         _Recipient(gl.message.sender_address).emit_transfer(value=u256(amt))
 
+    @gl.public.write
+    def set_oi_cap_bps(self, bps: u256) -> None:
+        """Adjust how much open interest a market may carry per unit of free vault
+        liquidity. Raising it lets traders take bigger positions and puts more of the
+        pool at risk; lowering it protects LPs at the cost of capacity."""
+        self._require_owner()
+        v = int(bps)
+        if v < 1000 or v > 200000:
+            raise gl.vm.UserError("oi_cap_bps must be between 1000 (0.1x) and 200000 (20x)")
+        self.oi_cap_bps = u256(v)
+
+    @gl.public.view
+    def get_capacity(self, symbol: str) -> dict[str, typing.Any]:
+        """How much more risk this market can take. The UI needs this to explain a
+        rejection before the trader hits it, rather than after."""
+        symbol = symbol.upper()
+        free_backing = max(0, int(self.vault_balance) - int(self.total_margin_locked))
+        oi = self._load(self.oi_json, {}).get(symbol, {"long": "0", "short": "0"})
+        current = int(oi["long"]) + int(oi["short"])
+        cap = free_backing * int(self.oi_cap_bps) // 10000
+        return {
+            "symbol": symbol,
+            "open_interest": str(current),
+            "max_open_interest": str(cap),
+            "room": str(max(0, cap - current)),
+            "free_backing": str(free_backing),
+            "oi_cap_bps": int(self.oi_cap_bps),
+            "bad_debt": str(self.bad_debt),
+        }
+
     # ─── Trading ─────────────────────────────────────────────────────
 
     @gl.public.write.payable
@@ -529,6 +596,25 @@ class PerpExchange(gl.Contract):
         fee = value * int(market["taker_fee_bps"]) // 10000
         net_margin = value - fee
         notional = net_margin * lev
+
+        # Cap open interest against the capital that would have to pay the winnings.
+        #
+        # Without this the exchange will happily accept a position far larger than
+        # it can settle, and the problem only surfaces when the trader tries to take
+        # profit. Every real venue caps open interest against its backing capital for
+        # exactly this reason; here the backing is whatever the vault holds beyond
+        # the margin already belonging to open positions.
+        free_backing = max(0, int(self.vault_balance) - int(self.total_margin_locked))
+        oi = self._load(self.oi_json, {}).get(symbol, {"long": "0", "short": "0"})
+        current_oi = int(oi["long"]) + int(oi["short"])
+        max_oi = free_backing * int(self.oi_cap_bps) // 10000
+        if current_oi + notional > max_oi:
+            room = max(0, max_oi - current_oi)
+            raise gl.vm.UserError(
+                f"Position too large for the vault to back. {symbol} can take "
+                f"{room} more wei of notional (cap {max_oi}, open {current_oi}). "
+                f"Lower the size or leverage, or wait for the pool to grow."
+            )
 
         entry_price = self._fetch_price(symbol, market["coingecko_id"])
         if entry_price <= 0:
@@ -610,20 +696,35 @@ class PerpExchange(gl.Contract):
 
         pct = self._price_change_pct(entry_price, current_price, p["direction"])
         pnl = notional * pct
-        payout = max(0, int(round(margin + pnl)))
-        # Solvency guard: never pay out more than the vault currently holds
-        payout = min(payout, int(self.vault_balance))
+        gross = max(0, int(round(margin + pnl)))
+
+        # Exit fee. Real perps charge on the way out as well as the way in, and
+        # taking it only on entry understated the cost of a round trip by half.
+        exit_fee = min(gross, int(round(notional * int(market["taker_fee_bps"]) / 10000)))
+        owed = gross - exit_fee
+
+        # If the vault cannot cover what is owed, record the gap rather than paying
+        # a smaller number and saying nothing. Silently truncating hands the trader a
+        # loss they never agreed to and leaves no trace that the exchange fell short.
+        available = int(self.vault_balance)
+        payout = min(owed, available)
+        shortfall = owed - payout
+        if shortfall > 0:
+            self.bad_debt += u256(shortfall)
 
         p["status"] = "CLOSED"
         p["close_price"] = str(current_price)
         p["closed_at"] = int(time.time())
         p["realized_pnl"] = str(int(round(pnl)))
+        p["exit_fee"] = str(exit_fee)
+        p["unpaid"] = str(shortfall)
         positions[pid] = p
         self.positions_json = json.dumps(positions)
 
         self._adjust_open_interest(p["symbol"], p["direction"], -notional)
         self.total_margin_locked = u256(max(0, int(self.total_margin_locked) - margin))
         self.vault_balance = u256(max(0, int(self.vault_balance) - payout))
+        self.protocol_fees_collected += u256(exit_fee)
         self._cache_price(p["symbol"], current_price)
 
         if payout > 0:
@@ -633,7 +734,9 @@ class PerpExchange(gl.Contract):
             "position_id": int(position_id),
             "close_price": str(current_price),
             "realized_pnl": str(int(round(pnl))),
+            "exit_fee": str(exit_fee),
             "payout": str(payout),
+            "unpaid": str(shortfall),
         }
 
     @gl.public.write
@@ -831,6 +934,7 @@ class PerpExchange(gl.Contract):
             "free_balance": str(max(0, int(self.vault_balance) - int(self.total_margin_locked))),
             "protocol_fees_collected": str(self.protocol_fees_collected),
             "total_positions": int(self.total_positions),
+            "bad_debt": str(self.bad_debt),
         }
 
     @gl.public.view

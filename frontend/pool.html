@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Earn — GenPredict</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="styles.css"/>
+</head>
+<body>
+
+<header class="header" data-app-header></header>
+
+<main class="page">
+  <div class="page__head">
+    <h1 class="page__title">Earn on your GEN</h1>
+    <p class="page__sub">
+      Supply GEN to a pool and earn <b id="apy-headline">10%</b> a year, counted per second.
+      No lock-up — take it out whenever you like, interest included.
+    </p>
+  </div>
+
+  <div class="notice notice--warn" style="margin-bottom:20px">
+    <span>ℹ️</span>
+    <span><b>The yield is a subsidy, not revenue.</b> It is paid from a reward balance the
+    operator tops up — trading fees do not cover it. Each pool shows how long its reward
+    balance lasts at the current size, and if it runs out your principal still comes back
+    in full while the unpaid interest is recorded rather than forgotten.</span>
+  </div>
+
+  <div class="grid" id="pools" style="grid-template-columns:repeat(auto-fit,minmax(340px,1fr))">
+    <div class="skel skel-card"></div>
+    <div class="skel skel-card"></div>
+  </div>
+
+  <div class="section-head"><h2>How it works</h2></div>
+  <div class="panel">
+    <dl class="rules">
+      <dt>1 — Supply</dt>
+      <dd>Send GEN to a pool. It starts earning the moment the transaction lands.</dd>
+      <dt>2 — Earn</dt>
+      <dd>Interest accrues every second at the advertised rate. Nothing to claim on a
+          schedule, nothing to compound manually, no gas spent while it grows.</dd>
+      <dt>3 — Withdraw</dt>
+      <dd>Take out any amount at any time. Interest is settled in proportion to what you
+          withdraw, so a partial exit leaves the rest earning.</dd>
+      <dt>What the two pools actually do</dt>
+      <dd><b>Predict</b> is a pure yield position — players there win from each other, so
+          your capital is never at risk from their trading. <b>Perps</b> is different: your
+          capital backs trader profit and loss, so it can shrink if traders win, and
+          withdrawals are limited to liquidity not currently backing an open position.
+          That risk is what the yield on that side is compensating for.</dd>
+    </dl>
+  </div>
+</main>
+
+<script type="importmap">
+{
+  "imports": {
+    "genlayer-js": "https://esm.sh/genlayer-js@1.1.8",
+    "genlayer-js/chains": "https://esm.sh/genlayer-js@1.1.8/chains",
+    "genlayer-js/types": "https://esm.sh/genlayer-js@1.1.8/types",
+    "viem/accounts": "https://esm.sh/viem@2.49.3/accounts"
+  }
+}
+</script>
+<script type="module" src="pool.js"></script>
+</body>
+</html>

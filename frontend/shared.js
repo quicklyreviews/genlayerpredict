@@ -510,6 +510,7 @@ export function mountHeader(activePage) {
       <a href="index.html" class="nav__link${activePage === "home" ? " is-active" : ""}">Markets</a>
       <a href="portfolio.html" class="nav__link${activePage === "portfolio" ? " is-active" : ""}">Portfolio</a>
       <a href="perp.html" class="nav__link${activePage === "perp" ? " is-active" : ""}">Perps</a>
+      <a href="pool.html" class="nav__link${activePage === "pool" ? " is-active" : ""}">Earn</a>
     </nav>
     <div class="header__right">
       <button id="hdr-vault" class="vault-chip hidden" title="Your play balance — click to deposit or withdraw">
