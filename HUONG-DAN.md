@@ -71,9 +71,21 @@ Toàn bộ pool trừ 3% phí, chia cho bên thắng **theo tỷ lệ tiền cư
 
 Hệ số nhân **thay đổi liên tục** cho tới khi đóng cược — bên nào ít tiền hơn thì thắng được nhiều hơn.
 
-### Tiền về tự động
+### Biết kết quả và nhận thưởng
 
-**Không cần bấm nhận thưởng.** Vòng chốt xong là tiền vào thẳng Play balance ngay lập tức.
+Vòng chốt xong, sàn **báo ngay cho bạn**:
+
+| Kết quả | Bạn thấy gì |
+|---|---|
+| **Thắng** | Thông báo xanh kèm số tiền, và banner **"X GEN waiting"** ở đầu trang |
+| **Thua** | Thông báo đỏ nói rõ vòng ra bên nào và giá chạy bao nhiêu |
+| **Hoàn tiền** | Thông báo kèm lý do — giá đứng yên, hoặc không ai vào cửa ngược lại |
+
+Thắng rồi bấm **Collect** để nhận. Tiền vào Play balance, dùng cược tiếp được ngay.
+
+Thắng nhiều vòng thì bấm **Collect all** — gom hết vào **một giao dịch**, khỏi phải ký từng vòng.
+
+> **Tiền thắng không bao giờ mất.** Sàn dọn bớt lịch sử cũ cho nhẹ, nhưng **không bao giờ xoá vòng còn tiền chưa nhận**. Bạn để một tuần rồi quay lại vẫn nhận được.
 
 ### Ba điều dễ gây bực nếu không biết trước
 
@@ -187,6 +199,9 @@ Play balance đang rỗng. Bấm ô Play balance → Deposit.
 **Cược xong mà số dư không đổi**
 Chờ khoảng một phút — mạng cần thời gian đồng thuận. Số sẽ tự cập nhật.
 
+**Thắng rồi mà số dư chưa tăng**
+Tiền thắng cần bấm **Collect** mới vào Play balance. Nhìn banner xanh ở đầu trang.
+
 **"Betting has closed for this round"**
 Đặt muộn quá. Sàn đóng cược sớm 45 giây để lệnh kịp lên chuỗi.
 
@@ -205,6 +220,6 @@ Node cho tối đa 500 request/giờ và 5000/ngày. Đợi ít phút. Đóng b�
 
 - **Đây là testnet.** GEN không có giá trị thật.
 - **Không ai can thiệp được giá.** Contract không có hàm nào nhận giá làm tham số.
-- **Tiền thắng tự về**, không cần đi nhận.
+- **Tiền thắng phải bấm Collect mới nhận**, nhưng không bao giờ mất — vòng còn tiền chưa nhận sẽ không bị dọn.
 - **Chỉ chạy trên Studionet.** Trỏ sang mạng khác là hệ thống từ chối chạy.
 - **Tiến trình nền không sống qua phiên** — đóng terminal là phải chạy lại `npm run backend`.

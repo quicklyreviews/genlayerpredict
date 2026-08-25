@@ -12,6 +12,7 @@ import {
   vaultState, openVaultModal,
 } from './shared.js';
 import { loadSession, refreshSessionGas } from './session.js';
+import * as results from './results.js';
 
 let markets = [];
 let filterHorizon = "all";
@@ -317,7 +318,7 @@ function initSearch() {
 function renderSettled() {
   const section = $("claims-section");
   const settled = myBets
-    .filter((b) => b.state === "WON" || b.state === "REFUNDED")
+    .filter((b) => ["CLAIMABLE", "REFUNDABLE", "COLLECTED"].includes(b.state))
     .slice(0, 6);
   if (!wallet.account || settled.length === 0) {
     section.classList.add("hidden");
@@ -331,12 +332,16 @@ function renderSettled() {
       <td class="t-center" style="color:var(--${b.side === "UP" ? "up" : "down"})">${b.side === "UP" ? "▲" : "▼"} ${b.side}</td>
       <td class="t-center mono">${genFromWei(b.amount)} GEN</td>
       <td class="t-center">${
-        b.state === "REFUNDED"
+        b.settlement === "VOID"
           ? '<span class="pill pill--draw">Refunded</span>'
           : `<span style="color:var(--${b.winner === "UP" ? "up" : "down"})">${b.winner}</span>`
       }</td>
       <td class="t-right mono" style="color:var(--up)">+${genFromWei(b.payout)} GEN</td>
-      <td class="t-right"><span class="pill pill--resolved">Paid to balance</span></td>
+      <td class="t-right">${
+        b.state === "COLLECTED"
+          ? '<span class="pill pill--resolved">Collected</span>'
+          : '<span class="pill pill--open">Ready to collect</span>'
+      }</td>
     </tr>`).join("");
 }
 
@@ -392,9 +397,16 @@ async function refreshMarkets() {
   initSearch();
   await autoReconnect();
   if (loadSession()) refreshSessionGas();
+  await results.primeSeen();
+  await results.refresh();
   await refreshBets();
 
-  onWalletChange(async () => { await refreshVaultChip(); await refreshBets(); });
+  onWalletChange(async () => {
+    await refreshVaultChip();
+    await results.primeSeen();
+    await results.refresh();
+    await refreshBets();
+  });
 
   // Countdowns are pure arithmetic on timestamps we already hold, so they tick
   // locally every second at no network cost. Anything that needs the chain is
@@ -403,4 +415,6 @@ async function refreshMarkets() {
   setInterval(renderGrid, 1000);
   pollWhileVisible(refreshMarkets, 30000);
   pollWhileVisible(refreshBets, 60000);
+  // Results are the thing a player is waiting for, so check a little more often.
+  pollWhileVisible(() => results.refresh(), 30000);
 })();

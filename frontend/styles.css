@@ -559,3 +559,17 @@ tbody tr:hover { background: var(--bg-raised); }
   background: var(--up-soft); color: var(--up);
   font-size: 11px; font-weight: 700;
 }
+
+/* ─── Winnings banner ────────────────────────────────────── */
+
+.claim-banner {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  padding: 15px 18px; margin-bottom: 18px;
+  background: linear-gradient(135deg, var(--up-soft), var(--accent-soft));
+  border: 1px solid var(--up-line); border-radius: var(--radius);
+}
+.claim-banner__text { flex: 1; min-width: 180px; }
+.claim-banner__amount {
+  font-family: var(--mono); font-size: 20px; font-weight: 700; color: var(--up);
+}
+.claim-banner__sub { font-size: 12.5px; color: var(--text-dim); margin-top: 2px; }

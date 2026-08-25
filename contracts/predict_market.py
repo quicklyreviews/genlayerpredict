@@ -60,22 +60,31 @@ class PredictMarket(gl.Contract):
 
         deposit()  →  credited to balances[your wallet]
         bet(...)   →  debited from that balance, no value attached
-        resolve    →  winnings credited straight back to the balance
+        resolve    →  the payout is calculated and recorded, not paid
+        claim()    →  you collect it into your balance
         withdraw() →  paid out to your wallet
 
     Your wallet address *is* your account number, which is what makes a deposit
     attributable without handing anyone custody: only the wallet that owns a
     balance can ever move it, and there is no operator key that can spend it.
 
-    Crediting winnings at resolution — instead of making each winner send a claim
-    transaction — is the single biggest quality-of-life change here. On a chain
-    that needs about a minute to agree on anything, a per-round claim was the
-    worst part of playing, and it also stranded winnings whenever a player simply
-    forgot to come back.
+    COLLECTING A WIN IS A DELIBERATE STEP
+
+    Resolution fixes what each bet is owed but does not move it; the winner calls
+    claim(). That is a product decision, not an accident — a win you press a button
+    to take is a win you noticed.
+
+    It does carry a real hazard: money that must be collected can be left behind.
+    Two things guard against it. claim_all() settles every outstanding win in one
+    transaction, so a player who won five rounds is not asked for five fees and
+    five consensus waits. And _prune() refuses to drop any round still holding an
+    uncollected win, however old — bounding state must never mean deleting somebody
+    else's money.
 
     Because the pool must always be able to pay, the contract tracks its own
-    solvency: total_liabilities() is what it owes everyone, and it can never fall
-    below that.
+    solvency: player balances, stakes still riding on open rounds, and winnings
+    decided but not yet collected are all money it owes, and it can never hold less
+    than their sum.
     """
 
     owner: str
@@ -85,6 +94,7 @@ class PredictMarket(gl.Contract):
     balances_json: str          # { "0xaddr": "wei" } — spendable, already deposited
     balances_total: u256        # sum of balances_json, so solvency is O(1) to check
     staked_total: u256          # stakes sitting in rounds that have not resolved yet
+    unclaimed_total: u256       # winnings decided but not yet collected
     markets_json: str           # { "BTC-5m": {config...} }
     rounds_json: str            # { "BTC-5m": { "7": {round...} } }
     bets_json: str              # { "BTC-5m": { "7": { "0xaddr": {bet...} } } }
@@ -112,6 +122,7 @@ class PredictMarket(gl.Contract):
         self.balances_json = "{}"
         self.balances_total = u256(0)
         self.staked_total = u256(0)
+        self.unclaimed_total = u256(0)
 
         # symbol, coingecko_id, horizon_seconds, betting_seconds, fee_bps, min_bet
         #
@@ -354,10 +365,21 @@ class PredictMarket(gl.Contract):
         distributable = total - fee
         return amount * distributable // winner_pool
 
+    def _has_unclaimed(self, bets: dict, market_key: str, rid: str) -> bool:
+        for bet in bets.get(market_key, {}).get(rid, {}).values():
+            if int(bet.get("payout", "0")) > 0 and int(bet.get("claimed", 0)) == 0:
+                return True
+        return False
+
     def _prune(self, rounds: dict, bets: dict, market_key: str) -> None:
-        """Keep state bounded. Every write re-serialises these blobs, so unbounded
-        history would make each bet progressively more expensive. Winnings must be
-        claimed within history_limit rounds — surfaced in the UI as a claim deadline."""
+        """Keep state bounded, but never at a player's expense.
+
+        Every write re-serialises these blobs, so unbounded history would make each
+        bet progressively more expensive. Old rounds are therefore dropped — except
+        any still holding winnings nobody has collected. Since winning now requires
+        an explicit claim, pruning on age alone would quietly delete money that
+        belongs to someone who simply has not come back yet.
+        """
         limit = int(self.history_limit)
         mrounds = rounds.get(market_key, {})
         resolved = sorted(
@@ -365,6 +387,8 @@ class PredictMarket(gl.Contract):
             reverse=True,
         )
         for rid in resolved[limit:]:
+            if self._has_unclaimed(bets, market_key, str(rid)):
+                continue
             mrounds.pop(str(rid), None)
             bets.get(market_key, {}).pop(str(rid), None)
 
@@ -570,13 +594,14 @@ class PredictMarket(gl.Contract):
         rounds[market_key] = mrounds
         bets = self._load(self.bets_json, {})
 
-        # Pay everyone out right here, straight into their vault balance. There is
-        # no claim step: a player should not have to send a transaction and wait a
-        # minute for consensus just to receive money they already won, and anyone
-        # who never came back used to forfeit it silently.
-        balances = self._load(self.balances_json, {})
+        # Work out what each bet is owed and record it. The money is not moved here:
+        # winners collect it themselves with claim(), which is what makes a win feel
+        # like something you did rather than something that happened while you were
+        # away. What resolution does guarantee is that the figure is fixed now, from
+        # the pools as they stood — so it cannot drift later, and an unclaimed win is
+        # a debt the contract already acknowledges.
         rbets = bets.get(market_key, {}).get(rid, {})
-        paid_out = 0
+        owed = 0
         winners = 0
         for addr, bet in rbets.items():
             if int(bet.get("settled", 0)) == 1:
@@ -584,13 +609,14 @@ class PredictMarket(gl.Contract):
             payout = self._payout_for(rnd, market, bet["side"], int(bet["amount"]))
             bet["settled"] = 1
             bet["payout"] = str(payout)
+            bet["claimed"] = 0
             if payout > 0:
-                self._credit(balances, addr, payout)
-                paid_out += payout
+                owed += payout
                 winners += 1
-        # Stakes for this round are no longer at risk, whatever the outcome.
+        # The stakes stop being at risk and become claimable instead, so the vault
+        # still owes exactly the same money — it has just changed category.
         self.staked_total = u256(max(0, int(self.staked_total) - total))
-        self.balances_json = json.dumps(balances)
+        self.unclaimed_total += u256(owed)
         if rbets:
             bets[market_key][rid] = rbets
 
@@ -606,7 +632,7 @@ class PredictMarket(gl.Contract):
             "winner": winner,
             "settlement": settlement,
             "fee": str(fee),
-            "paid_out": str(paid_out),
+            "claimable": str(owed),
             "winners": winners,
         }
 
@@ -755,6 +781,7 @@ class PredictMarket(gl.Contract):
             "providers": len(self._load(self.stakes_json, {})),
             "player_balances": str(self.balances_total),
             "at_risk_in_rounds": str(self.staked_total),
+            "unclaimed_winnings": str(self.unclaimed_total),
             "treasury": str(self.treasury),
         }
 
@@ -882,6 +909,117 @@ class PredictMarket(gl.Contract):
             "amount": str(amount),
             "lock_ts": int(rnd["lock_ts"]),
         }
+
+    @gl.public.write
+    def claim(self, market_key: str, round_id: u256) -> dict[str, typing.Any]:
+        """Collect a win. Credits your play balance so it is ready to bet again."""
+        rid = str(int(round_id))
+        rounds = self._load(self.rounds_json, {})
+        rnd = rounds.get(market_key, {}).get(rid)
+        if not rnd:
+            raise gl.vm.UserError("Round not found")
+        if rnd.get("status") != "RESOLVED":
+            raise gl.vm.UserError("This round has not settled yet")
+
+        player = str(gl.message.sender_address).lower()
+        bets = self._load(self.bets_json, {})
+        bet = bets.get(market_key, {}).get(rid, {}).get(player)
+        if not bet:
+            raise gl.vm.UserError("You did not bet on this round")
+        if int(bet.get("claimed", 0)) == 1:
+            raise gl.vm.UserError("Already collected")
+        payout = int(bet.get("payout", "0"))
+        if payout <= 0:
+            raise gl.vm.UserError("This bet did not win — there is nothing to collect")
+
+        bet["claimed"] = 1
+        bets[market_key][rid] = bets[market_key][rid]
+        self.bets_json = json.dumps(bets)
+
+        balances = self._load(self.balances_json, {})
+        self._credit(balances, player, payout)
+        self.balances_json = json.dumps(balances)
+        self.unclaimed_total = u256(max(0, int(self.unclaimed_total) - payout))
+
+        return {
+            "market": market_key,
+            "round_id": int(round_id),
+            "collected": str(payout),
+            "refund": 1 if rnd.get("settlement") == "VOID" else 0,
+        }
+
+    @gl.public.write
+    def claim_all(self) -> dict[str, typing.Any]:
+        """Collect every outstanding win in one transaction.
+
+        Without this, a player who won five rounds would pay five fees and wait five
+        consensus rounds to be made whole — enough friction to leave money behind,
+        which is the failure mode a claim step invites in the first place.
+        """
+        player = str(gl.message.sender_address).lower()
+        markets = self._load(self.markets_json, {})
+        rounds = self._load(self.rounds_json, {})
+        bets = self._load(self.bets_json, {})
+        balances = self._load(self.balances_json, {})
+
+        total = 0
+        claimed_rounds = []
+        for market_key in markets.keys():
+            for rid, rbets in bets.get(market_key, {}).items():
+                bet = rbets.get(player)
+                if not bet or int(bet.get("claimed", 0)) == 1:
+                    continue
+                payout = int(bet.get("payout", "0"))
+                if payout <= 0:
+                    continue
+                rnd = rounds.get(market_key, {}).get(rid)
+                if not rnd or rnd.get("status") != "RESOLVED":
+                    continue
+                bet["claimed"] = 1
+                total += payout
+                claimed_rounds.append(f"{market_key}#{rid}")
+
+        if total <= 0:
+            raise gl.vm.UserError("Nothing to collect")
+
+        self.bets_json = json.dumps(bets)
+        self._credit(balances, player, total)
+        self.balances_json = json.dumps(balances)
+        self.unclaimed_total = u256(max(0, int(self.unclaimed_total) - total))
+        return {"collected": str(total), "rounds": len(claimed_rounds)}
+
+    @gl.public.view
+    def get_claimable(self, addr: str) -> str:
+        """Everything this player has won and not yet collected."""
+        addr = addr.lower()
+        markets = self._load(self.markets_json, {})
+        rounds = self._load(self.rounds_json, {})
+        bets = self._load(self.bets_json, {})
+        out = []
+        for market_key in markets.keys():
+            for rid, rbets in bets.get(market_key, {}).items():
+                bet = rbets.get(addr)
+                if not bet or int(bet.get("claimed", 0)) == 1:
+                    continue
+                payout = int(bet.get("payout", "0"))
+                if payout <= 0:
+                    continue
+                rnd = rounds.get(market_key, {}).get(rid)
+                if not rnd or rnd.get("status") != "RESOLVED":
+                    continue
+                out.append({
+                    "market": market_key,
+                    "round_id": int(rid),
+                    "side": bet["side"],
+                    "amount": bet["amount"],
+                    "payout": str(payout),
+                    "winner": rnd.get("winner", ""),
+                    "settlement": rnd.get("settlement", ""),
+                    "lock_price": rnd.get("lock_price", ""),
+                    "close_price": rnd.get("close_price", ""),
+                })
+        out.sort(key=lambda b: b["round_id"], reverse=True)
+        return json.dumps(out)
 
     # ─── Views ───────────────────────────────────────────────────────
 
@@ -1036,16 +1174,17 @@ class PredictMarket(gl.Contract):
             if status == "RESOLVED" and "payout" not in bet:
                 payout = self._payout_for(rnd, market, bet["side"], int(bet["amount"]))
 
-            # Nothing here is ever "claimable": resolution already paid it into the
-            # player's balance, so the only question is how the round turned out.
+            claimed = int(bet.get("claimed", 0)) == 1
             if status != "RESOLVED":
                 state = "LIVE" if status == "LOCKED" else "PENDING"
-            elif rnd.get("settlement") == "VOID":
-                state = "REFUNDED"
-            elif payout > 0:
-                state = "WON"
-            else:
+            elif payout <= 0:
                 state = "LOST"
+            elif claimed:
+                state = "COLLECTED"
+            elif rnd.get("settlement") == "VOID":
+                state = "REFUNDABLE"
+            else:
+                state = "CLAIMABLE"
             out.append({
                 "market": market_key,
                 "round_id": int(rid),
@@ -1095,18 +1234,33 @@ class PredictMarket(gl.Contract):
     def get_vault(self) -> dict[str, typing.Any]:
         """Solvency at a glance: what the pool owes versus what it is holding.
 
-        liabilities = player balances + stakes still riding on unresolved rounds
-        + fees owed to the treasury. Every one of those is money the contract must
-        still be able to pay out, so it should never exceed what it holds.
+        Liabilities are every category of money that is not the contract's own:
+
+            player balances      already deposited, spendable
+            at risk in rounds    staked on rounds that have not settled
+            unclaimed winnings   decided, owed, and waiting to be collected
+            treasury             fees owed to the owner
+            staked principal     supplied by liquidity providers
+            rewards pool         the subsidy set aside to pay their yield
+
+        Unclaimed winnings belong on that list precisely because collecting is a
+        deliberate step now: a win nobody has picked up yet is still a debt, and
+        leaving it out would report the pool as healthier than it is.
         """
         balances = int(self.balances_total)
         staked = int(self.staked_total)
+        unclaimed = int(self.unclaimed_total)
         treasury = int(self.treasury)
+        lp = int(self.staked_principal)
+        rewards = int(self.rewards_pool)
         return {
             "player_balances": str(balances),
             "at_risk_in_rounds": str(staked),
+            "unclaimed_winnings": str(unclaimed),
             "treasury": str(treasury),
-            "total_liabilities": str(balances + staked + treasury),
+            "staked_principal": str(lp),
+            "rewards_pool": str(rewards),
+            "total_liabilities": str(balances + staked + unclaimed + treasury + lp + rewards),
             "accounts": len(self._load(self.balances_json, {})),
         }
 

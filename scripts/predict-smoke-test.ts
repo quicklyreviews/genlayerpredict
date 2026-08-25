@@ -58,8 +58,25 @@ const BAD = new Set(["UNDETERMINED", "CANCELED", "VALIDATORS_TIMEOUT", "LEADER_T
 const gen = (wei: string | bigint) => (Number(BigInt(wei)) / 1e18).toFixed(6);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function read(fn: string, args: any[] = []) {
-  return client.readContract({ address: A, functionName: fn, args } as any);
+/**
+ * Reads retry on transport failures.
+ *
+ * These tests wait minutes for a round to settle, polling throughout, so a single
+ * dropped connection would otherwise abandon a run that was proceeding perfectly —
+ * which is exactly what happened. A network blip is not a test failure; only the
+ * contract disagreeing with expectations is.
+ */
+async function read(fn: string, args: any[] = [], attempt = 1): Promise<any> {
+  try {
+    return await client.readContract({ address: A, functionName: fn, args } as any);
+  } catch (e: any) {
+    const transient = /fetch failed|timeout|ECONNRESET|socket hang up|network/i.test(String(e.message));
+    if (transient && attempt <= 5) {
+      await sleep(5000 * attempt);
+      return read(fn, args, attempt + 1);
+    }
+    throw e;
+  }
 }
 
 async function write(fn: string, args: any[] = [], valueWei = 0n) {
@@ -198,26 +215,42 @@ async function main() {
   console.log("   ✅ one-sided round voided and refunds the full stake (no fee taken)");
 
   console.log("\n6️⃣  Claiming");
-  console.log("   winnings should already be credited — there is no claim step");
+  console.log("   winnings are recorded but NOT paid until claimed");
   const bal3 = BigInt((await read("get_balance", [account.address.toLowerCase()])) as any);
 
   // The balance is wallet-wide, so other rounds settling in the same window also
   // move it — comparing its delta against one bet's payout reads a correct contract
   // as broken. The invariant that actually holds: the balance grew by exactly the
   // sum of every bet that settled while we were waiting.
-  const settledSum = (JSON.parse(
-    (await read("get_user_portfolio", [account.address.toLowerCase()])) as any
-  ) as any[])
-    .filter((b) => (b.state === "WON" || b.state === "REFUNDED") && !openBefore.has(`${b.market}#${b.round_id}`))
-    .reduce((sum, b) => sum + BigInt(b.payout), 0n);
-
-  console.log(`   play balance after settlement: ${gen(bal3)} GEN (+${gen(bal3 - bal2)})`);
-  console.log(`   settled while waiting: ${gen(settledSum)} GEN across all markets`);
-  if (bal3 - bal2 !== settledSum) {
-    throw new Error(`balance grew ${gen(bal3 - bal2)} but settlements totalled ${gen(settledSum)}`);
+  console.log(`   play balance after settlement: ${gen(bal3)} GEN (unchanged — nothing collected yet)`);
+  if (bal3 !== bal2) {
+    throw new Error(`settlement must not move money: balance went ${gen(bal2)} to ${gen(bal3)}`);
   }
   if (BigInt(mine.payout) !== BigInt(mine.amount)) {
     throw new Error(`this bet should have been refunded in full, got ${gen(mine.payout)}`);
+  }
+
+  // Now collect it, which is the step the player takes.
+  const claimable = JSON.parse((await read("get_claimable", [account.address.toLowerCase()])) as any);
+  console.log(`   claimable rounds: ${claimable.length}`);
+  if (!claimable.some((c: any) => c.round_id === target.id)) {
+    throw new Error("this round is not listed as claimable");
+  }
+  console.log("   collecting");
+  await write("claim", [MARKET, target.id]);
+  const bal3b = BigInt((await read("get_balance", [account.address.toLowerCase()])) as any);
+  console.log(`   play balance after collecting: ${gen(bal3b)} GEN (+${gen(bal3b - bal3)})`);
+  if (bal3b - bal3 !== BigInt(mine.payout)) {
+    throw new Error(`collect credited ${gen(bal3b - bal3)}, expected ${gen(mine.payout)}`);
+  }
+
+  // Collecting twice must be impossible.
+  try {
+    await write("claim", [MARKET, target.id]);
+    throw new Error("double collect should have been rejected");
+  } catch (e: any) {
+    if (String(e.message).includes("double collect should")) throw e;
+    console.log("   OK - collecting twice is rejected");
   }
   if (mine.state !== "REFUNDED") throw new Error(`expected REFUNDED, got ${mine.state}`);
   console.log("   OK - credited automatically at resolution");

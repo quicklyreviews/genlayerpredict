@@ -13,6 +13,7 @@ import {
 } from './shared.js';
 import { sessionActive, sessionWrite, sessionWaitAccepted, refreshSessionGas,
          session, onSessionChange, loadSession } from './session.js';
+import * as results from './results.js';
 
 const marketKey = new URLSearchParams(location.search).get("m") || "BTC-5m";
 
@@ -532,8 +533,9 @@ function renderMyBets() {
   const statePill = {
     PENDING: `<span class="pill pill--open">Open</span>`,
     LIVE: `<span class="pill pill--live"><span class="dot-live"></span>Live</span>`,
-    WON: `<span class="pill pill--open">Won</span>`,
-    REFUNDED: `<span class="pill pill--draw">Refunded</span>`,
+    CLAIMABLE: `<span class="pill pill--open">Won</span>`,
+    REFUNDABLE: `<span class="pill pill--draw">Refunded</span>`,
+    COLLECTED: `<span class="pill pill--resolved">Collected</span>`,
     LOST: `<span class="pill pill--resolved">Lost</span>`,
   };
   host.innerHTML = `<div class="table-scroll"><table>
@@ -546,13 +548,33 @@ function renderMyBets() {
         <td class="t-center mono">${genFromWei(b.amount, 2)}</td>
         <td class="t-center">${statePill[b.state] || b.state}</td>
         <td class="t-right">${
-          b.state === "WON" || b.state === "REFUNDED"
+          b.state === "CLAIMABLE" || b.state === "REFUNDABLE"
+            ? `<button class="btn btn--primary btn--sm" data-collect="${b.round_id}">Collect ${genFromWei(b.payout, 2)}</button>`
+            : b.state === "COLLECTED"
             ? `<span class="mono" style="color:var(--up)">+${genFromWei(b.payout, 3)}</span>`
             : b.state === "LOST"
             ? `<span class="mono" style="color:var(--down)">−${genFromWei(b.amount, 3)}</span>`
             : `<span style="color:var(--text-muted)">pending</span>`
         }</td>
       </tr>`).join("")}</tbody></table></div>`;
+
+  host.querySelectorAll("[data-collect]").forEach((btn) =>
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      btn.textContent = "Confirm…";
+      try {
+        const hash = await write(CONFIG.predictAddress, "claim", [marketKey, Number(btn.dataset.collect)]);
+        toast(`Collecting — <a href="${txLink(hash)}" target="_blank">view tx</a>`, "pending", { html: true });
+        await waitAccepted(hash);
+        toast("Collected into your play balance", "success");
+        await Promise.all([refreshBets(), refreshVaultChip({ fresh: true }), results.refresh({ fresh: true })]);
+      } catch (e) {
+        toast(e.message || "Could not collect", "error");
+        btn.disabled = false;
+        btn.textContent = "Collect";
+      }
+    })
+  );
 }
 
 // ─── Data ───────────────────────────────────────────────────────────
@@ -597,6 +619,8 @@ async function refreshBets() {
   // sees it switched off, and turning it back on would mint a second key while the
   // first one still held their funds.
   if (loadSession()) refreshSessionGas();
+  await results.primeSeen();
+  await results.refresh();
   await refreshVaultChip();
   await refreshBets();
 
@@ -610,6 +634,7 @@ async function refreshBets() {
   pollWhileVisible(refresh, 30000);
   pollWhileVisible(refreshSpot, 30000);
   pollWhileVisible(refreshBets, 60000);
+  pollWhileVisible(() => results.refresh(), 30000);
   onVaultChange(() => { if (detail) renderBetPanel(); });
   onSessionChange(() => { if (detail) renderBetPanel(); });
 })();
