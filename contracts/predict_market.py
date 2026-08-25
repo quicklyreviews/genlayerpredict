@@ -933,6 +933,8 @@ class PredictMarket(gl.Contract):
             raise gl.vm.UserError("This bet did not win — there is nothing to collect")
 
         bet["claimed"] = 1
+        # Stamped so history can say when it was collected, not merely that it was.
+        bet["claimed_ts"] = int(time.time())
         bets[market_key][rid] = bets[market_key][rid]
         self.bets_json = json.dumps(bets)
 
@@ -962,6 +964,7 @@ class PredictMarket(gl.Contract):
         bets = self._load(self.bets_json, {})
         balances = self._load(self.balances_json, {})
 
+        now = int(time.time())
         total = 0
         claimed_rounds = []
         for market_key in markets.keys():
@@ -976,6 +979,7 @@ class PredictMarket(gl.Contract):
                 if not rnd or rnd.get("status") != "RESOLVED":
                     continue
                 bet["claimed"] = 1
+                bet["claimed_ts"] = now
                 total += payout
                 claimed_rounds.append(f"{market_key}#{rid}")
 
@@ -1197,6 +1201,12 @@ class PredictMarket(gl.Contract):
                 "close_price": rnd.get("close_price", ""),
                 "payout": str(payout),
                 "state": state,
+                # A history without times is a list, not a history: these let the
+                # page say when a round ran and when the money was picked up.
+                "start_ts": int(rnd.get("start_ts", 0)),
+                "lock_ts": int(rnd.get("lock_ts", 0)),
+                "close_ts": int(rnd.get("close_ts", 0)),
+                "claimed_ts": int(bet.get("claimed_ts", 0)),
             })
         out.sort(key=lambda b: b["round_id"], reverse=True)
         return out

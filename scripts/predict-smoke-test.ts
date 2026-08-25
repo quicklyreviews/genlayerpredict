@@ -160,7 +160,7 @@ async function main() {
   // Anything already settled before this run must not be counted as ours later.
   const openBefore = new Set(
     (JSON.parse((await read("get_user_portfolio", [account.address.toLowerCase()])) as any) as any[])
-      .filter((b) => b.state === "WON" || b.state === "REFUNDED")
+      .filter((b) => ["CLAIMABLE", "REFUNDABLE", "COLLECTED"].includes(b.state))
       .map((b) => `${b.market}#${b.round_id}`)
   );
 
@@ -252,8 +252,14 @@ async function main() {
     if (String(e.message).includes("double collect should")) throw e;
     console.log("   OK - collecting twice is rejected");
   }
-  if (mine.state !== "REFUNDED") throw new Error(`expected REFUNDED, got ${mine.state}`);
-  console.log("   OK - credited automatically at resolution");
+  const after = (JSON.parse((await read("get_user_portfolio", [account.address.toLowerCase()])) as any) as any[])
+    .find((b) => b.market === MARKET && b.round_id === target.id);
+  if (!after) throw new Error("the collected bet vanished from history");
+  if (after.state !== "COLLECTED") {
+    throw new Error(`expected COLLECTED after claiming, got ${after.state}`);
+  }
+  if (!Number(after.claimed_ts)) throw new Error("collection was not timestamped");
+  console.log(`   OK - history reads COLLECTED, stamped ${new Date(Number(after.claimed_ts) * 1000).toISOString()}`);
 
   console.log("   withdrawing back to the wallet");
   await write("withdraw_all", []);
@@ -270,8 +276,18 @@ async function main() {
   // The assertion that matters: what the contract physically holds must cover what
   // its ledger says it owes. Under-collateralised means someone cannot be paid;
   // over means funds are stranded with no way to reach anyone.
-  const held = BigInt(await contractBalance());
+  //
+  // Both figures are read after the withdrawal settles, not merely after it is
+  // ACCEPTED. The ledger drops to zero the moment the transaction lands, but the
+  // native transfer out follows a beat later — so reading straight away catches a
+  // real contract mid-step and reports solvent funds as stranded, which is exactly
+  // how this failed before. Poll until the two agree, and only then judge.
   const owed = BigInt(vault.total_liabilities);
+  let held = BigInt(await contractBalance());
+  for (let i = 0; i < 12 && owed === 0n && held > 0n; i++) {
+    await sleep(5000);
+    held = BigInt(await contractBalance());
+  }
   console.log(`   holds ${gen(held)} GEN, owes ${gen(owed)} GEN`);
   if (held < owed) {
     throw new Error(`under-collateralised: holds ${gen(held)} but owes ${gen(owed)}`);

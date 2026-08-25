@@ -508,7 +508,7 @@ export function mountHeader(activePage) {
     </a>
     <nav class="nav" aria-label="Primary">
       <a href="index.html" class="nav__link${activePage === "home" ? " is-active" : ""}">Markets</a>
-      <a href="portfolio.html" class="nav__link${activePage === "portfolio" ? " is-active" : ""}">Portfolio</a>
+      <a href="portfolio.html" class="nav__link${activePage === "portfolio" ? " is-active" : ""}">History</a>
       <a href="perp.html" class="nav__link${activePage === "perp" ? " is-active" : ""}">Perps</a>
       <a href="pool.html" class="nav__link${activePage === "pool" ? " is-active" : ""}">Earn</a>
     </nav>

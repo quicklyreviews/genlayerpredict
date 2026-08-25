@@ -87,6 +87,26 @@ Thắng nhiều vòng thì bấm **Collect all** — gom hết vào **một giao
 
 > **Tiền thắng không bao giờ mất.** Sàn dọn bớt lịch sử cũ cho nhẹ, nhưng **không bao giờ xoá vòng còn tiền chưa nhận**. Bạn để một tuần rồi quay lại vẫn nhận được.
 
+### Xem lại lịch sử
+
+Tab **History** lưu **mọi phiên bạn đã tham gia** — không mất và không rút gọn.
+
+Mỗi dòng nói đủ bốn điều:
+
+| Cột | Ý nghĩa |
+|---|---|
+| **When** | Phiên chạy lúc nào (di chuột vào xem giờ chính xác) |
+| **Outcome** | Thắng / Thua / Hoàn tiền — kèm **lý do**: bên nào thắng và giá chạy bao nhiêu |
+| **Result** | Được cộng hay mất bao nhiêu GEN |
+| **Collected** | **Đã nhận chưa** — chưa thì có nút nhận ngay tại dòng, nhận rồi thì hiện giờ nhận |
+
+Năm bộ lọc ở trên: **All · To collect · Running · Won · Lost**.
+Muốn biết *còn tiền nào chưa nhận* thì bấm **To collect** — một cú click.
+
+**Thống kê ở đầu trang:** số phiên đã chơi, tỷ lệ thắng, lãi/lỗ ròng, tiền chưa nhận, tiền đang nằm trong phiên chưa chốt.
+
+> **Tỷ lệ thắng không tính phiên hoàn tiền.** Lấy lại tiền của chính mình vì không ai vào cửa ngược không phải là bạn đoán đúng — tính vào sẽ làm con số đẹp hơn sự thật.
+
 ### Ba điều dễ gây bực nếu không biết trước
 
 **1. Đặt cược sớm, đừng đợi phút chót**
@@ -200,7 +220,10 @@ Play balance đang rỗng. Bấm ô Play balance → Deposit.
 Chờ khoảng một phút — mạng cần thời gian đồng thuận. Số sẽ tự cập nhật.
 
 **Thắng rồi mà số dư chưa tăng**
-Tiền thắng cần bấm **Collect** mới vào Play balance. Nhìn banner xanh ở đầu trang.
+Tiền thắng cần bấm **Collect** mới vào Play balance. Nhìn banner xanh ở đầu trang, hoặc vào **History → To collect**.
+
+**Không nhớ đã chơi phiên nào**
+Vào tab **History** — mọi phiên đều ở đó, kèm kết quả và trạng thái đã nhận tiền hay chưa.
 
 **"Betting has closed for this round"**
 Đặt muộn quá. Sàn đóng cược sớm 45 giây để lệnh kịp lên chuỗi.

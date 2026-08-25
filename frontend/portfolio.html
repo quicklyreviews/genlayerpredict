@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Portfolio — GenPredict</title>
+<title>History — GenPredict</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet"/>
@@ -15,8 +15,8 @@
 
 <main class="page">
   <div class="page__head">
-    <h1 class="page__title">Your portfolio</h1>
-    <p class="page__sub">Every prediction you've made, across all markets.</p>
+    <h1 class="page__title">Your history</h1>
+    <p class="page__sub">Every round you joined, how it ended, and what you have collected.</p>
   </div>
 
   <div data-claim-banner class="hidden"></div>
@@ -24,23 +24,25 @@
   <div class="grid" id="summary" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));margin-bottom:22px"></div>
 
   <div class="section-head">
-    <h2>Bet history</h2>
+    <h2>Rounds</h2>
     <p id="hist-note"></p>
   </div>
+
+  <div class="chips" id="pf-filters" style="margin-bottom:14px"></div>
 
   <div class="table-wrap">
     <div class="table-scroll">
       <table>
         <thead>
           <tr>
-            <th>Market</th><th>Round</th><th class="t-center">Pick</th>
+            <th>Market</th><th class="t-center">When</th><th class="t-center">Pick</th>
             <th class="t-center">Stake</th><th class="t-center">Lock → Close</th>
-            <th class="t-center">Result</th><th class="t-center">Status</th>
-            <th class="t-right">Payout</th>
+            <th class="t-center">Outcome</th><th class="t-right">Result</th>
+            <th class="t-right">Collected</th>
           </tr>
         </thead>
         <tbody id="pf-body">
-          <tr><td colspan="8" class="empty">Connect your wallet to see your bets</td></tr>
+          <tr><td colspan="8" class="empty">Connect your wallet to see your history</td></tr>
         </tbody>
       </table>
     </div>

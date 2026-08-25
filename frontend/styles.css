@@ -147,6 +147,23 @@ input { font: inherit; }
   font-family: var(--mono); font-size: 11px; opacity: 0.6;
 }
 .chip__dot { width: 8px; height: 8px; border-radius: 50%; }
+/* A filter with nothing behind it stays visible but unclickable: hiding it would
+   make the row jump around as rounds settle. */
+.chip:disabled { opacity: 0.4; cursor: default; }
+.chip:disabled:hover { color: var(--text-dim); border-color: var(--border); }
+
+/* ─── History rows ───────────────────────────────────────── */
+
+/* The second line under a result: why it went that way, or when it was collected. */
+.hist-note {
+  font-size: 11px; color: var(--text-muted);
+  margin-top: 3px; line-height: 1.35;
+}
+.hist-market {
+  display: inline-flex; align-items: center; gap: 8px;
+  color: var(--text); font-weight: 600;
+}
+.hist-market:hover { color: var(--accent); }
 
 /* ─── Market grid ────────────────────────────────────────── */
 
