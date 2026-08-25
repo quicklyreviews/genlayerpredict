@@ -454,7 +454,10 @@ async function renderInstantPanel(host) {
  */
 export function pollWhileVisible(fn, intervalMs) {
   let timer = null;
-  const tick = () => { if (!document.hidden) fn(); };
+  let lastRun = 0;
+
+  const run = () => { lastRun = Date.now(); fn(); };
+  const tick = () => { if (!document.hidden) run(); };
   const start = () => {
     if (timer) return;
     timer = setInterval(tick, intervalMs);
@@ -464,12 +467,42 @@ export function pollWhileVisible(fn, intervalMs) {
     clearInterval(timer);
     timer = null;
   };
-  document.addEventListener("visibilitychange", () => {
-    if (document.hidden) { stop(); }
-    else { fn(); start(); }
-  });
+
+  /**
+   * Coming back to the tab used to refetch immediately, every time.
+   *
+   * That is right after a long absence and wrong after a short one, and nothing
+   * distinguished the two: every visibilitychange fired every poller at once. Alt
+   * tabbing back and forth, or a phone screen waking, replayed the whole page's
+   * polling on each flip. Measured in a browser whose visibility flapped, one open
+   * page made 109 requests in 41 seconds against a node that allows 500 an hour —
+   * which is how reads started failing and the play balance showed "retry".
+   *
+   * So refresh on return only when the data is actually stale, and otherwise just
+   * resume the clock with the time already served deducted.
+   */
+  const onVisibility = () => {
+    if (document.hidden) return stop();
+    const since = Date.now() - lastRun;
+    if (since >= intervalMs) {
+      run();
+      start();
+    } else {
+      // Finish the interval that was interrupted rather than restarting it whole,
+      // so a tab flicked away and back does not delay its next refresh.
+      setTimeout(() => { if (!document.hidden) { tick(); start(); } }, intervalMs - since);
+    }
+  };
+  document.addEventListener("visibilitychange", onVisibility);
+
+  lastRun = Date.now();
   start();
-  return () => { stop(); };
+  return () => {
+    stop();
+    // The listener outlived the poller before this, so a page that stopped polling
+    // kept waking on every visibility change for the life of the document.
+    document.removeEventListener("visibilitychange", onVisibility);
+  };
 }
 
 // ─── Toasts ─────────────────────────────────────────────────────────

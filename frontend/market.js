@@ -120,6 +120,56 @@ function poolRows(r) {
     </div>`;
 }
 
+/**
+ * Your stake in a round, shown on the round's own card.
+ *
+ * The cards described the round but never said whether you were in it, so the one
+ * question you have after placing a bet — am I actually in, and on which side —
+ * could only be answered by scrolling to a separate table. Now the round you are
+ * betting on says so itself.
+ */
+function myStakeStrip(r, { live = false } = {}) {
+  const mine = myBets.find((b) => b.round_id === r.id);
+  if (!mine) return "";
+  const side = mine.side === "UP" ? "up" : "down";
+  const arrow = mine.side === "UP" ? "▲" : "▼";
+
+  // Once you are in, the countdown that matters is the one to the result — not the
+  // one to the end of betting, which is what the card shows before you have staked.
+  // A dormant round has no clock yet: its window only starts when the first bet
+  // lands, so quoting a time there would be inventing one.
+  const untilResult = r.close_ts - now();
+  const resultIn = isDormant(r)
+    ? `<span class="stake-strip__when">result once the round starts</span>`
+    : `<span class="stake-strip__when">result in <b data-tick-result="${r.close_ts}">${fmtCountdown(Math.max(0, untilResult))}</b></span>`;
+
+  let standing = "";
+  if (live) {
+    // Provisional only: the round settles on the price at close, not the price now,
+    // and a one-sided round refunds instead of paying. Say so rather than implying
+    // the result is decided.
+    const spot = parseFloat(($("chart-price")?.textContent || "").replace(/[$,]/g, ""));
+    const lock = parseFloat(r.lock_price);
+    const otherEmpty = BigInt(mine.side === "UP" ? r.down_pool : r.up_pool) === 0n;
+    if (otherEmpty) {
+      standing = `<span class="stake-strip__note">nobody on the other side yet — refunds if it stays that way</span>`;
+    } else if (isFinite(spot) && isFinite(lock) && lock > 0 && spot !== lock) {
+      const ahead = (spot > lock) === (mine.side === "UP");
+      standing = `<span class="stake-strip__note" style="color:var(--${ahead ? "up" : "down"})">` +
+                 `${ahead ? "ahead" : "behind"} right now · settles on the closing price</span>`;
+    }
+  }
+
+  return `
+    <div class="stake-strip stake-strip--${side}">
+      <span class="stake-strip__head">Your bet</span>
+      <span class="stake-strip__pick" style="color:var(--${side})">${arrow} ${mine.side}</span>
+      <span class="stake-strip__amt mono">${genFromWei(mine.amount, 3)} GEN</span>
+      ${resultIn}
+      ${standing}
+    </div>`;
+}
+
 function nextCard(r) {
   const left = bettableSeconds(r);
   const untilLock = r.lock_ts - now();
@@ -153,6 +203,7 @@ function nextCard(r) {
       </div>
       <div class="round__body">
         ${cd}
+        ${myStakeStrip(r)}
         ${note}
         ${poolRows(r)}
         <div class="pool-row"><span>Locks at</span><b>${fmtClock(r.lock_ts)}</b></div>
@@ -175,6 +226,7 @@ function liveCard(r) {
           <div class="countdown__value">${fmtCountdown(Math.max(0, toClose))}</div>
           <div class="countdown__label">${toClose > 0 ? "until settlement" : "settling…"}</div>
         </div>
+        ${myStakeStrip(r, { live: true })}
         <div class="pricebox">
           <div class="priceline"><span>Locked price</span><b>${fmtUsd(r.lock_price)}</b></div>
           <div class="priceline"><span>Now</span><b>${spot}</b></div>
@@ -203,6 +255,33 @@ function renderRounds() {
 
 // ─── History ────────────────────────────────────────────────────────
 
+/**
+ * What a finished round meant for you, in the results table itself.
+ *
+ * The table reported who won every round but never whether you were in it, so the
+ * page could tell you UP took round #7 while staying silent on the fact that you
+ * had backed DOWN — or that you had won and the money was still sitting there
+ * uncollected. Participation, outcome and the collect button belong on the row.
+ */
+function myResultCell(r) {
+  if (!wallet.account) return `<span style="color:var(--text-muted)">—</span>`;
+  const mine = myBets.find((b) => b.round_id === r.id);
+  if (!mine) return `<span style="color:var(--text-muted)" title="You did not bet on this round">—</span>`;
+
+  const pick = `<span style="color:var(--${mine.side === "UP" ? "up" : "down"})">${mine.side === "UP" ? "▲" : "▼"}</span>`;
+  if (mine.state === "CLAIMABLE" || mine.state === "REFUNDABLE") {
+    return `${pick} <button class="btn btn--primary btn--sm" data-collect="${mine.round_id}">Collect ${genFromWei(mine.payout, 2)}</button>`;
+  }
+  if (mine.state === "COLLECTED") {
+    return `${pick} <span class="mono" style="color:var(--up)">+${genFromWei(mine.payout, 3)}</span>
+            <span class="pill pill--resolved">Collected</span>`;
+  }
+  if (mine.state === "LOST") {
+    return `${pick} <span class="mono" style="color:var(--down)">−${genFromWei(mine.amount, 3)}</span>`;
+  }
+  return `${pick} <span style="color:var(--text-muted)">settling…</span>`;
+}
+
 function renderHistory() {
   const rows = (detail.history || []).map((r) => {
     const d = priceDelta(r.lock_price, r.close_price);
@@ -219,11 +298,16 @@ function renderHistory() {
       <td class="t-center">${winner}</td>
       <td class="t-right mono">${genFromWei(r.total_pool, 2)}</td>
       <td class="t-right mono" style="color:var(--text-dim)">${fmtMultiplier(r.up_multiplier_x100)} / ${fmtMultiplier(r.down_multiplier_x100)}</td>
+      <td class="t-right" style="white-space:nowrap">${myResultCell(r)}</td>
     </tr>`;
   });
   $("history-body").innerHTML = rows.length
     ? rows.join("")
-    : `<tr><td colspan="7" class="empty">No completed rounds yet</td></tr>`;
+    : `<tr><td colspan="8" class="empty">No completed rounds yet</td></tr>`;
+
+  $("history-body").querySelectorAll("[data-collect]").forEach((btn) =>
+    btn.addEventListener("click", () => collectRound(btn))
+  );
 }
 
 // ─── Bet panel ──────────────────────────────────────────────────────
@@ -528,8 +612,6 @@ function renderMyBets() {
     host.innerHTML = `<div class="empty" style="padding:20px">No bets on this market yet</div>`;
     return;
   }
-  // No collect button anywhere: resolution credits the play balance directly, so a
-  // settled row is a receipt rather than something still owed to the player.
   const statePill = {
     PENDING: `<span class="pill pill--open">Open</span>`,
     LIVE: `<span class="pill pill--live"><span class="dot-live"></span>Live</span>`,
@@ -559,22 +641,26 @@ function renderMyBets() {
       </tr>`).join("")}</tbody></table></div>`;
 
   host.querySelectorAll("[data-collect]").forEach((btn) =>
-    btn.addEventListener("click", async () => {
-      btn.disabled = true;
-      btn.textContent = "Confirm…";
-      try {
-        const hash = await write(CONFIG.predictAddress, "claim", [marketKey, Number(btn.dataset.collect)]);
-        toast(`Collecting — <a href="${txLink(hash)}" target="_blank">view tx</a>`, "pending", { html: true });
-        await waitAccepted(hash);
-        toast("Collected into your play balance", "success");
-        await Promise.all([refreshBets(), refreshVaultChip({ fresh: true }), results.refresh({ fresh: true })]);
-      } catch (e) {
-        toast(e.message || "Could not collect", "error");
-        btn.disabled = false;
-        btn.textContent = "Collect";
-      }
-    })
+    btn.addEventListener("click", () => collectRound(btn))
   );
+}
+
+/** Shared by every collect button on the page — the results table and the bets table. */
+async function collectRound(btn) {
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Confirm…";
+  try {
+    const hash = await write(CONFIG.predictAddress, "claim", [marketKey, Number(btn.dataset.collect)]);
+    toast(`Collecting — <a href="${txLink(hash)}" target="_blank">view tx</a>`, "pending", { html: true });
+    await waitAccepted(hash);
+    toast("Collected into your play balance", "success");
+    await Promise.all([refreshBets(), refreshVaultChip({ fresh: true }), results.refresh({ fresh: true })]);
+  } catch (e) {
+    toast(e.message || "Could not collect", "error");
+    btn.disabled = false;
+    btn.textContent = label;
+  }
 }
 
 // ─── Data ───────────────────────────────────────────────────────────
@@ -604,6 +690,8 @@ async function refreshBets() {
     myBets = typeof raw === "string" ? JSON.parse(raw) : raw || [];
   } catch (e) { myBets = []; }
   renderMyBets();
+  // The results table shows your side of each round, so it is stale until this runs.
+  if (detail) renderHistory();
   if (detail) renderBetPanel();
 }
 

@@ -71,6 +71,14 @@ Toàn bộ pool trừ 3% phí, chia cho bên thắng **theo tỷ lệ tiền cư
 
 Hệ số nhân **thay đổi liên tục** cho tới khi đóng cược — bên nào ít tiền hơn thì thắng được nhiều hơn.
 
+### Đặt cược xong thì thấy gì
+
+Ngay trên thẻ của vòng bạn vừa cược sẽ hiện **Your bet** — cửa nào, bao nhiêu GEN, và **đếm ngược tới lúc có kết quả**.
+
+Khi vòng đã khoá và đang chạy, thẻ còn nói bạn đang *ahead* hay *behind* theo giá hiện tại — nhưng đó chỉ là tạm thời, **kết quả chốt theo giá lúc đóng**.
+
+Bảng **Recent results** ngay dưới có cột **You**: không tham gia thì dấu —, thắng thì có nút nhận ngay, thua thì hiện số mất.
+
 ### Biết kết quả và nhận thưởng
 
 Vòng chốt xong, sàn **báo ngay cho bạn**:

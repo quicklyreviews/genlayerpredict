@@ -590,3 +590,28 @@ tbody tr:hover { background: var(--bg-raised); }
   font-family: var(--mono); font-size: 20px; font-weight: 700; color: var(--up);
 }
 .claim-banner__sub { font-size: 12.5px; color: var(--text-dim); margin-top: 2px; }
+
+/* ─── Your stake, on the round card ──────────────────────── */
+
+/* Answers "am I in this round?" where the round is, rather than in a table
+   further down the page. */
+.stake-strip {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  margin: 10px 0; padding: 9px 12px; border-radius: 10px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-left-width: 3px;
+  font-size: 13px;
+}
+.stake-strip--up { border-left-color: var(--up); }
+.stake-strip--down { border-left-color: var(--down); }
+.stake-strip__head {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .6px;
+  color: var(--text-muted); font-weight: 700;
+}
+.stake-strip__pick { font-weight: 700; }
+.stake-strip__amt { font-weight: 600; }
+.stake-strip__note {
+  flex-basis: 100%; font-size: 11px; color: var(--text-muted); line-height: 1.35;
+}
+.stake-strip__when { margin-left: auto; font-size: 12px; color: var(--text-dim); }
+.stake-strip__when b { font-family: var(--mono); color: var(--text); font-weight: 600; }

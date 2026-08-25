@@ -9,7 +9,7 @@ import {
   CONFIG, ASSET_META, $, loadConfig, readPredict, mountHeader, wallet, onWalletChange,
   autoReconnect, genFromWei, fmtCountdown, fmtHorizon, fmtUsd, fmtMultiplier, impliedPct,
   toast, CONSENSUS_BUFFER_SECONDS, coinLogo, pollWhileVisible, refreshVaultChip,
-  vaultState, openVaultModal,
+  vaultState, openVaultModal, write, waitAccepted, txLink,
 } from './shared.js';
 import { loadSession, refreshSessionGas } from './session.js';
 import * as results from './results.js';
@@ -311,38 +311,75 @@ function initSearch() {
 // ─── Recent settlements ─────────────────────────────────────────────
 
 /**
- * Replaces what used to be a "collect your winnings" table. Winnings are credited
- * to the play balance the moment a round resolves, so there is nothing to click —
- * this just shows what landed, so the money arriving is still visible.
+ * Your recent results — wins, losses and refunds alike.
+ *
+ * This used to list only the rounds that paid, on the reasoning that a loss has
+ * nothing to show. But a results table that silently omits losses is not a record
+ * of what happened, it is a highlight reel: a player who lost three rounds saw an
+ * empty table and no explanation. Every settled round appears, and the ones still
+ * owing money carry the button to collect it.
  */
 function renderSettled() {
   const section = $("claims-section");
   const settled = myBets
-    .filter((b) => ["CLAIMABLE", "REFUNDABLE", "COLLECTED"].includes(b.state))
-    .slice(0, 6);
+    .filter((b) => ["CLAIMABLE", "REFUNDABLE", "COLLECTED", "LOST"].includes(b.state))
+    .slice(0, 8);
   if (!wallet.account || settled.length === 0) {
     section.classList.add("hidden");
     return;
   }
   section.classList.remove("hidden");
-  $("claims-body").innerHTML = settled.map((b) => `
+  const waiting = settled.filter((b) => b.state === "CLAIMABLE" || b.state === "REFUNDABLE").length;
+  $("claims-note").textContent = waiting
+    ? `${waiting} waiting to be collected`
+    : "Everything settled has been collected";
+
+  $("claims-body").innerHTML = settled.map((b) => {
+    const lost = b.state === "LOST";
+    const outcome = b.settlement === "VOID"
+      ? '<span class="pill pill--draw">Refunded</span>'
+      : lost
+      ? `<span class="pill pill--resolved">Lost</span>`
+      : `<span class="pill pill--open">Won</span>`;
+    const amount = lost
+      ? `<span class="mono" style="color:var(--down)">−${genFromWei(b.amount)} GEN</span>`
+      : `<span class="mono" style="color:var(--up)">+${genFromWei(b.payout)} GEN</span>`;
+    const action = lost
+      ? `<span style="color:var(--text-muted)">${b.winner} took it</span>`
+      : b.state === "COLLECTED"
+      ? '<span class="pill pill--resolved">Collected</span>'
+      : `<button class="btn btn--primary btn--sm" data-collect="${b.market}|${b.round_id}">Collect</button>`;
+    return `
     <tr>
-      <td>${b.market}</td>
+      <td><a href="market.html?m=${encodeURIComponent(b.market)}" style="color:var(--text)">${b.market}</a></td>
       <td class="mono">#${b.round_id}</td>
       <td class="t-center" style="color:var(--${b.side === "UP" ? "up" : "down"})">${b.side === "UP" ? "▲" : "▼"} ${b.side}</td>
       <td class="t-center mono">${genFromWei(b.amount)} GEN</td>
-      <td class="t-center">${
-        b.settlement === "VOID"
-          ? '<span class="pill pill--draw">Refunded</span>'
-          : `<span style="color:var(--${b.winner === "UP" ? "up" : "down"})">${b.winner}</span>`
-      }</td>
-      <td class="t-right mono" style="color:var(--up)">+${genFromWei(b.payout)} GEN</td>
-      <td class="t-right">${
-        b.state === "COLLECTED"
-          ? '<span class="pill pill--resolved">Collected</span>'
-          : '<span class="pill pill--open">Ready to collect</span>'
-      }</td>
-    </tr>`).join("");
+      <td class="t-center">${outcome}</td>
+      <td class="t-right">${amount}</td>
+      <td class="t-right">${action}</td>
+    </tr>`;
+  }).join("");
+
+  $("claims-body").querySelectorAll("[data-collect]").forEach((btn) =>
+    btn.addEventListener("click", async () => {
+      const [market, rid] = btn.dataset.collect.split("|");
+      const label = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Confirm…";
+      try {
+        const hash = await write(CONFIG.predictAddress, "claim", [market, Number(rid)]);
+        toast(`Collecting — <a href="${txLink(hash)}" target="_blank">view tx</a>`, "pending", { html: true });
+        await waitAccepted(hash);
+        toast("Collected into your play balance", "success");
+        await Promise.all([refreshBets(), refreshVaultChip({ fresh: true }), results.refresh({ fresh: true })]);
+      } catch (e) {
+        toast(e.message || "Could not collect", "error");
+        btn.disabled = false;
+        btn.textContent = label;
+      }
+    })
+  );
 }
 
 /** Funding is a prerequisite for playing, so say so before the user picks a market
@@ -357,7 +394,7 @@ function renderFundPrompt() {
   host.classList.remove("hidden");
   host.innerHTML = `
     <p><b>Add funds to start playing.</b> Bets are staked from your play balance,
-    and winnings are paid straight back into it — no claiming, no waiting.</p>
+    and winnings go back into it as soon as you collect them.</p>
     <button class="btn btn--primary btn--sm" id="fund-now">Deposit GEN</button>`;
   $("fund-now").addEventListener("click", () => openVaultModal("deposit"));
 }
