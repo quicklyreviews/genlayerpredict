@@ -152,10 +152,10 @@ async function api(endpoint, options = {}) {
   }
 }
 
-export async function readPredict(fn, args = []) {
+export async function readPredict(fn, args = [], { fresh = false } = {}) {
   return api("/api/predict/call", {
     method: "POST",
-    body: JSON.stringify({ method: fn, args, type: "read" }),
+    body: JSON.stringify({ method: fn, args, type: "read", fresh }),
   });
 }
 
@@ -399,20 +399,27 @@ export function mountHeader(activePage) {
     btn.disabled = false;
   });
 
-  $("hdr-vault").addEventListener("click", () => openVaultModal());
+  $("hdr-vault").addEventListener("click", () => {
+    if (vaultState.error && !vaultState.loaded) return refreshVaultChip({ fresh: true });
+    openVaultModal();
+  });
 
   const sync = async () => {
     if (wallet.account) {
       btn.textContent = shortAddr(wallet.account);
       btn.classList.remove("btn--primary");
       btn.classList.add("btn--ghost");
-      const bal = await getBalance();
-      const b = $("hdr-balance");
-      if (bal !== null && b) {
-        b.textContent = `${genFromWei(bal, 2)} GEN wallet`;
-        b.classList.remove("hidden");
-      }
-      await refreshVaultChip();
+      // Fired together, not chained: the wallet call goes to the browser extension
+      // and the play balance to our backend, and one being slow must not hold up
+      // the other.
+      getBalance().then((bal) => {
+        const b = $("hdr-balance");
+        if (bal !== null && b) {
+          b.textContent = `${genFromWei(bal, 2)} GEN wallet`;
+          b.classList.remove("hidden");
+        }
+      });
+      refreshVaultChip();
     } else {
       btn.textContent = "Connect Wallet";
       btn.classList.add("btn--primary");
@@ -428,27 +435,60 @@ export function mountHeader(activePage) {
 
 // ─── Vault (play balance) ───────────────────────────────────────────
 
-export const vaultState = { balance: 0n, atRisk: 0n };
+export const vaultState = { balance: 0n, atRisk: 0n, loaded: false, error: null };
 const vaultListeners = [];
 
 export function onVaultChange(fn) { vaultListeners.push(fn); }
 
-export async function refreshVaultChip() {
-  if (!wallet.account || !CONFIG.predictAddress) return;
+/**
+ * Loads the play balance on its own, never behind anything else.
+ *
+ * It used to run after the wallet balance in the same await chain, so a slow or
+ * unresponsive wallet provider stopped it loading at all — and because the chip
+ * stayed hidden until a value arrived, the failure looked like the feature simply
+ * did not exist. It now shows itself immediately in a loading state and reports a
+ * failure instead of vanishing.
+ *
+ * Pass { fresh: true } straight after a deposit, bet or withdrawal: reads are
+ * cached for 30s, and without it the user would be shown the balance from just
+ * before their own transaction landed.
+ */
+export async function refreshVaultChip({ fresh = false } = {}) {
+  const chip = $("hdr-vault");
+  const amt = $("hdr-vault-amount");
+  if (!wallet.account || !CONFIG.predictAddress) {
+    chip?.classList.add("hidden");
+    return;
+  }
+  if (chip && amt) {
+    chip.classList.remove("hidden");
+    if (vaultState.balance === 0n && !vaultState.loaded) amt.textContent = "…";
+    chip.classList.add("vault-chip--loading");
+  }
   try {
-    const acct = await readPredict("get_account", [wallet.account.toLowerCase()]);
+    const acct = await readPredict("get_account", [wallet.account.toLowerCase()], { fresh });
     vaultState.balance = BigInt(acct.balance || "0");
     vaultState.atRisk = BigInt(acct.at_risk || "0");
-    const chip = $("hdr-vault");
-    const amt = $("hdr-vault-amount");
+    vaultState.loaded = true;
+    vaultState.error = null;
     if (chip && amt) {
       amt.textContent = `${genFromWei(vaultState.balance, 2)} GEN`;
-      chip.classList.remove("hidden");
       chip.classList.toggle("vault-chip--empty", vaultState.balance === 0n);
+      chip.title = `Play balance ${genFromWei(vaultState.balance, 4)} GEN` +
+        (vaultState.atRisk > 0n ? ` · ${genFromWei(vaultState.atRisk, 4)} GEN riding on open rounds` : "") +
+        " — click to deposit or withdraw";
     }
     vaultListeners.forEach((fn) => { try { fn(vaultState); } catch (e) { console.error(e); } });
   } catch (e) {
-    /* backend may be cold — the chip simply keeps its last value */
+    vaultState.error = e.message || "unavailable";
+    // Keep a known balance on screen rather than blanking it; only say "retry"
+    // when there has never been one to show.
+    if (chip && amt && !vaultState.loaded) {
+      amt.textContent = "retry";
+      chip.title = `Could not load your play balance: ${vaultState.error}. Click to retry.`;
+    }
+  } finally {
+    chip?.classList.remove("vault-chip--loading");
   }
 }
 
@@ -554,7 +594,7 @@ export function openVaultModal(mode = "deposit") {
             "pending", { html: true, timeout: 10000 });
       await waitAccepted(hash);
       toast(`${current === "deposit" ? "Deposited" : "Withdrew"} ${amount()} GEN`, "success");
-      await refreshVaultChip();
+      await refreshVaultChip({ fresh: true });
       host.remove();
     } catch (e) {
       err.textContent = e.message || "Transaction failed";

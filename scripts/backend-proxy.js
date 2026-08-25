@@ -141,12 +141,14 @@ async function handleRead(method, args, { allowStale = true, address = CONTRACT_
 // round trip, and those move slowly enough that 15s is imperceptible.
 const PREDICT_TTL_MS = parseInt(process.env.PREDICT_TTL_MS || "30000", 10);
 
-async function handlePredictRead(method, args) {
+async function handlePredictRead(method, args, { fresh = false } = {}) {
   if (!PREDICT_ADDRESS) throw new Error("PREDICT_CONTRACT_ADDRESS is not configured");
   const cacheKey = "predict:" + method + JSON.stringify(args || []);
   const hit = readCache[cacheKey];
   const ttl = method === "get_all_markets" ? LONG_TTL_MS : PREDICT_TTL_MS;
-  if (hit && Date.now() - hit.ts < ttl) return hit.value;
+  // A caller that just moved money needs to see the result, not a value cached
+  // moments before the transaction landed. Everything else takes the cache.
+  if (!fresh && hit && Date.now() - hit.ts < ttl) return hit.value;
   try {
     const result = await withTimeout(
       client.readContract({ address: PREDICT_ADDRESS, functionName: method, args: args || [] }),
@@ -200,11 +202,11 @@ const server = http.createServer(async (req, res) => {
     req.on("data", (chunk) => (body += chunk));
     req.on("end", async () => {
       try {
-        const { method, args, type } = JSON.parse(body);
+        const { method, args, type, fresh } = JSON.parse(body);
         if (type === "write") {
           throw new Error(`Predict writes must be signed by your own wallet, not the backend`);
         }
-        json(res, await handlePredictRead(method, args));
+        json(res, await handlePredictRead(method, args, { fresh: fresh === true }));
       } catch (e) {
         json(res, { error: e.message }, 500);
       }

@@ -490,7 +490,7 @@ async function submitBet() {
     await waitAccepted(hash);
     toast(`${stake} GEN on ${selectedSide} confirmed for round #${round.id}`, "success");
     selectedSide = null;
-    await Promise.all([refresh(), refreshBets(), refreshVaultChip()]);
+    await Promise.all([refresh(), refreshBets(), refreshVaultChip({ fresh: true })]);
   } catch (e) {
     toast(e.message || "Bet failed", "error");
   } finally {
