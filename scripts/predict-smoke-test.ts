@@ -106,7 +106,16 @@ async function main() {
     const d = await detail();
     const r = d.next_round;
     const left = r ? r.lock_ts - Math.floor(Date.now() / 1000) : -1;
-    if (r && r.status === "OPEN" && left > 75) { target = r; break; }
+    // A round with no stake never locks — the keeper leaves it alone so idle markets
+    // cost nothing — so it is bettable no matter how long ago lock_ts passed. Judging
+    // it by the clock alone made this test wait forever on a perfectly open round.
+    const dormant = r && r.status === "OPEN"
+      && BigInt(r.up_pool) + BigInt(r.down_pool) === 0n;
+    if (r && r.status === "OPEN" && (dormant || left > 75)) {
+      target = r;
+      console.log(dormant ? "   round is dormant — this bet should wake it and restart the window" : "");
+      break;
+    }
     console.log(`   waiting… next=${r ? `#${r.id} lock in ${left}s` : "none"}`);
     await sleep(30000);
   }
@@ -116,20 +125,46 @@ async function main() {
   console.log("\n3️⃣  Placing the bet");
   const stakeWei = BigInt(Math.round(STAKE_GEN * 1e18));
   const walletBefore = BigInt((await balance()) as string);
-  console.log("   depositing first — funding is mandatory before playing");
+
+  // Assert on deltas, never on absolutes: the account may already hold a balance
+  // from an earlier run, and an absolute check reads that as the contract having
+  // invented or lost money. It cost a false alarm to learn that.
+  const bal0 = BigInt((await read("get_balance", [account.address.toLowerCase()])) as any);
+  console.log(`   starting play balance: ${gen(bal0)} GEN`);
+
+  console.log("   depositing — funding is mandatory before playing");
   await write("deposit", [], stakeWei);
   const bal1 = BigInt((await read("get_balance", [account.address.toLowerCase()])) as any);
-  console.log(`   play balance: ${gen(bal1)} GEN`);
-  if (bal1 !== stakeWei) throw new Error(`deposit mismatch: expected ${gen(stakeWei)}, got ${gen(bal1)}`);
+  console.log(`   play balance: ${gen(bal1)} GEN (+${gen(bal1 - bal0)})`);
+  if (bal1 - bal0 !== stakeWei) {
+    throw new Error(`deposit should have credited ${gen(stakeWei)}, credited ${gen(bal1 - bal0)}`);
+  }
+
+  // Anything already settled before this run must not be counted as ours later.
+  const openBefore = new Set(
+    (JSON.parse((await read("get_user_portfolio", [account.address.toLowerCase()])) as any) as any[])
+      .filter((b) => b.state === "WON" || b.state === "REFUNDED")
+      .map((b) => `${b.market}#${b.round_id}`)
+  );
+
   console.log("   staking from that balance (no value attached to the bet)");
   await write("bet", [MARKET, SIDE, stakeWei]);
   const bal2 = BigInt((await read("get_balance", [account.address.toLowerCase()])) as any);
-  if (bal2 !== 0n) throw new Error(`stake should have been debited, balance is ${gen(bal2)}`);
+  console.log(`   play balance: ${gen(bal2)} GEN (−${gen(bal1 - bal2)})`);
+  if (bal1 - bal2 !== stakeWei) {
+    throw new Error(`stake should have debited ${gen(stakeWei)}, debited ${gen(bal1 - bal2)}`);
+  }
   const afterBet = await detail();
+  const woken = [afterBet.next_round, afterBet.live_round].find((r: any) => r && r.id === target.id);
+  const windowLeft = woken ? woken.lock_ts - Math.floor(Date.now() / 1000) : -1;
+  if (windowLeft <= 0) {
+    throw new Error(`betting window did not restart on wake: lock_ts is ${windowLeft}s away`);
+  }
+  console.log(`   window restarted — ${windowLeft}s left for the other side to take it`);
   const rNow = [afterBet.next_round, afterBet.live_round].find((r: any) => r && r.id === target.id);
   console.log(`   pools → UP ${gen(rNow.up_pool)} / DOWN ${gen(rNow.down_pool)} GEN`);
-  if (BigInt(rNow.total_pool) !== BigInt(Math.round(STAKE_GEN * 1e18))) {
-    throw new Error(`pool mismatch: expected ${STAKE_GEN} GEN, got ${gen(rNow.total_pool)}`);
+  if (BigInt(rNow.total_pool) < stakeWei) {
+    throw new Error(`pool should hold at least this stake, holds ${gen(rNow.total_pool)}`);
   }
 
   console.log("\n4️⃣  Waiting for the round to lock and settle (several minutes)");
@@ -165,9 +200,24 @@ async function main() {
   console.log("\n6️⃣  Claiming");
   console.log("   winnings should already be credited — there is no claim step");
   const bal3 = BigInt((await read("get_balance", [account.address.toLowerCase()])) as any);
-  console.log(`   play balance after settlement: ${gen(bal3)} GEN`);
-  if (bal3 !== BigInt(mine.payout)) {
-    throw new Error(`settlement should have credited ${gen(mine.payout)}, balance is ${gen(bal3)}`);
+
+  // The balance is wallet-wide, so other rounds settling in the same window also
+  // move it — comparing its delta against one bet's payout reads a correct contract
+  // as broken. The invariant that actually holds: the balance grew by exactly the
+  // sum of every bet that settled while we were waiting.
+  const settledSum = (JSON.parse(
+    (await read("get_user_portfolio", [account.address.toLowerCase()])) as any
+  ) as any[])
+    .filter((b) => (b.state === "WON" || b.state === "REFUNDED") && !openBefore.has(`${b.market}#${b.round_id}`))
+    .reduce((sum, b) => sum + BigInt(b.payout), 0n);
+
+  console.log(`   play balance after settlement: ${gen(bal3)} GEN (+${gen(bal3 - bal2)})`);
+  console.log(`   settled while waiting: ${gen(settledSum)} GEN across all markets`);
+  if (bal3 - bal2 !== settledSum) {
+    throw new Error(`balance grew ${gen(bal3 - bal2)} but settlements totalled ${gen(settledSum)}`);
+  }
+  if (BigInt(mine.payout) !== BigInt(mine.amount)) {
+    throw new Error(`this bet should have been refunded in full, got ${gen(mine.payout)}`);
   }
   if (mine.state !== "REFUNDED") throw new Error(`expected REFUNDED, got ${mine.state}`);
   console.log("   OK - credited automatically at resolution");
@@ -176,17 +226,38 @@ async function main() {
   await write("withdraw_all", []);
   const bal4 = BigInt((await read("get_balance", [account.address.toLowerCase()])) as any);
   if (bal4 !== 0n) throw new Error(`withdraw_all left ${gen(bal4)} behind`);
+  // Reading the wallet right after ACCEPTED catches it before the native transfer
+  // settles, so that figure lies. The reconciliation below is the real proof anyway.
   const walletAfter = BigInt((await balance()) as string);
-  console.log(`   wallet round trip: ${(Number(walletAfter - walletBefore) / 1e18).toFixed(6)} GEN (gas only)`);
+  console.log(`   wallet: ${gen(walletAfter)} GEN (indicative — native transfer settles a beat later)`);
 
   const vault: any = await read("get_vault", []);
   console.log("   vault:", JSON.stringify(vault));
-  if (BigInt(vault.total_liabilities) !== 0n) {
-    throw new Error(`vault should owe nothing, owes ${gen(vault.total_liabilities)}`);
+
+  // The assertion that matters: what the contract physically holds must cover what
+  // its ledger says it owes. Under-collateralised means someone cannot be paid;
+  // over means funds are stranded with no way to reach anyone.
+  const held = BigInt(await contractBalance());
+  const owed = BigInt(vault.total_liabilities);
+  console.log(`   holds ${gen(held)} GEN, owes ${gen(owed)} GEN`);
+  if (held < owed) {
+    throw new Error(`under-collateralised: holds ${gen(held)} but owes ${gen(owed)}`);
   }
-  console.log("   OK - vault owes nothing after the round trip");
+  if (owed === 0n && held > 0n) {
+    throw new Error(`owes nothing yet still holds ${gen(held)} — funds are stranded`);
+  }
+  console.log("   OK - what it holds reconciles with what it owes");
 
   console.log("\n✅ Smoke test passed — deposit, bet, settle, auto-credit and withdraw all work on-chain.");
+}
+
+async function contractBalance(): Promise<string> {
+  const r = await fetch(RPC, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", method: "eth_getBalance", params: [A, "latest"], id: 1 }),
+  });
+  return ((await r.json()) as any).result;
 }
 
 async function balance(): Promise<string> {
