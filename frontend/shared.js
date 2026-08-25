@@ -672,8 +672,8 @@ export function openVaultModal(mode = "deposit") {
         <button class="modal__x" data-close aria-label="Close">✕</button>
       </div>
       <p class="modal__intro">
-        Bets are staked from this balance, and winnings land back in it the moment a
-        round settles — no claiming. Top it up once and play as many rounds as you like.
+        Bets are staked from this balance, and collecting a win puts the payout
+        straight back in it. Top it up once and play as many rounds as you like.
       </p>
       <div class="modal__tabs">
         <button class="modal__tab${mode === "deposit" ? " is-active" : ""}" data-mode="deposit">Deposit</button>

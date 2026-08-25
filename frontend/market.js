@@ -416,7 +416,7 @@ function renderBetPanel() {
     host.innerHTML = `
       <div class="fund-prompt" style="margin-bottom:12px">
         <p><b>Add funds to place a bet.</b> Stakes come from your play balance, and
-        winnings are paid back into it automatically when the round settles.</p>
+        winnings go back into it as soon as you collect them.</p>
         <button class="btn btn--primary btn--sm" id="bp-fund">Deposit GEN</button>
       </div>
       <div class="pool-row"><span>Betting closes in</span><b data-tick-countdown>${fmtCountdown(left)}</b></div>`;
@@ -431,7 +431,8 @@ function renderBetPanel() {
         <span>${mine.side === "UP" ? "▲" : "▼"}</span>
         <span>You backed <b style="color:var(--${mine.side === "UP" ? "up" : "down"})">${mine.side}</b>
         with ${genFromWei(mine.amount)} GEN on round #${round.id}.
-        One bet per round, so you're locked in — settlement happens automatically.</span>
+        One bet per round, so you're locked in. The round settles on its own — if you
+        win, collect the payout from the results table below.</span>
       </div>
       <div class="pool-row"><span>Betting closes in</span><b data-tick-countdown>${fmtCountdown(left)}</b></div>`;
     return;

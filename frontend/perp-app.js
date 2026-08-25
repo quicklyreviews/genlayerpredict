@@ -9,6 +9,9 @@
 import { createClient } from 'genlayer-js';
 import { studionet } from 'genlayer-js/chains';
 import { TransactionStatus } from 'genlayer-js/types';
+// The one polling helper the whole app uses, so hidden-tab behaviour is identical
+// everywhere rather than reimplemented per page.
+import { pollWhileVisible } from './shared.js';
 
 // ─── Configuration ──────────────────────────────────────────────────
 let CONFIG = {
@@ -505,24 +508,47 @@ function saveConfig() {
 }
 
 // ─── Polling ────────────────────────────────────────────────────────
-// The GenLayer Studio RPC caps requests at ~30/minute, shared across every browser
+// The GenLayer Studio RPC allows 500 requests an hour, shared across every browser
 // tab and the keeper. Market configs only change on an admin call, so refreshing
 // them every tick wastes most of that budget — reload them occasionally instead.
 let _pollTick = 0;
 const MARKETS_EVERY_N_POLLS = 10;
 
+/**
+ * Polling stops when the tab is hidden, and runs a good deal slower than it did.
+ *
+ * This used to be a bare setInterval at 12 seconds that never checked whether
+ * anyone was looking. A perps tab left open in the background kept reading the
+ * chain forever — roughly a thousand requests an hour against a node that allows
+ * five hundred, from a page nobody could see. Every other page in the app already
+ * paused when hidden, and the user guide promised that behaviour; this one did not
+ * honour it.
+ *
+ * Thirty seconds also sits above the backend's read cache rather than under it, so
+ * a poll now tends to cost one round trip instead of guaranteeing a fresh one.
+ * Positions and funding move on the scale of minutes, so nothing here needs a
+ * twelve-second heartbeat. The price ticker keeps its own faster cadence: it comes
+ * from Binance directly and costs the node nothing.
+ */
 function startPolling() {
-  if (pollInterval) clearInterval(pollInterval);
-  if (tickerInterval) clearInterval(tickerInterval);
+  stopPolling();
   loadMarkets(); loadVaultStatus(); fetchFundingInfo();
-  pollInterval = setInterval(() => {
+  pollInterval = pollWhileVisible(() => {
     _pollTick++;
     if (_pollTick % MARKETS_EVERY_N_POLLS === 0) loadMarkets();
     loadVaultStatus();
     fetchFundingInfo();
     if (userAccount) { fetchUserPositions(); updateWalletBalance(); }
-  }, 12000);
-  tickerInterval = setInterval(fetchTickerPrice, 15000);
+  }, 30000);
+  tickerInterval = pollWhileVisible(fetchTickerPrice, 15000);
+}
+
+/** Both handles are disposers now, not interval ids. */
+function stopPolling() {
+  if (typeof pollInterval === "function") pollInterval();
+  if (typeof tickerInterval === "function") tickerInterval();
+  pollInterval = null;
+  tickerInterval = null;
 }
 
 // ─── Init ───────────────────────────────────────────────────────────
