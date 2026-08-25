@@ -254,6 +254,6 @@ async function refreshMarkets() {
   // polled far more slowly and pauses entirely while the tab is hidden — the node
   // allows 5000 requests a day in total and the round keeper needs most of them.
   setInterval(renderGrid, 1000);
-  pollWhileVisible(refreshMarkets, 20000);
+  pollWhileVisible(refreshMarkets, 30000);
   pollWhileVisible(refreshBets, 60000);
 })();

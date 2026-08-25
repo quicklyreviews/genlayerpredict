@@ -65,8 +65,11 @@ async function read(fn: string, args: any[] = []) {
 async function write(fn: string, args: any[] = [], valueWei = 0n) {
   const hash = await client.writeContract({ address: A, functionName: fn, args, value: valueWei } as any);
   process.stdout.write(`   tx ${hash.slice(0, 12)}… `);
-  for (let i = 0; i < 90; i++) {
-    await sleep(5000);
+  // The node caps requests per hour as well as per day, and polling a ~70s
+  // consensus every 5s spent ~14 of them on a single transaction. Every 20s is
+  // four checks and just as conclusive.
+  for (let i = 0; i < 30; i++) {
+    await sleep(20000);
     const tx: any = await client.getTransaction({ hash });
     const cd = tx.consensus_data;
     const lr = Array.isArray(cd?.leader_receipt) ? cd.leader_receipt[0] : cd?.leader_receipt;
@@ -105,13 +108,23 @@ async function main() {
     const left = r ? r.lock_ts - Math.floor(Date.now() / 1000) : -1;
     if (r && r.status === "OPEN" && left > 75) { target = r; break; }
     console.log(`   waiting… next=${r ? `#${r.id} lock in ${left}s` : "none"}`);
-    await sleep(10000);
+    await sleep(30000);
   }
   if (!target) throw new Error("No round opened with enough betting time");
   console.log(`   ✅ round #${target.id}, ${target.lock_ts - Math.floor(Date.now() / 1000)}s before lock`);
 
   console.log("\n3️⃣  Placing the bet");
-  await write("bet", [MARKET, SIDE], BigInt(Math.round(STAKE_GEN * 1e18)));
+  const stakeWei = BigInt(Math.round(STAKE_GEN * 1e18));
+  const walletBefore = BigInt((await balance()) as string);
+  console.log("   depositing first — funding is mandatory before playing");
+  await write("deposit", [], stakeWei);
+  const bal1 = BigInt((await read("get_balance", [account.address.toLowerCase()])) as any);
+  console.log(`   play balance: ${gen(bal1)} GEN`);
+  if (bal1 !== stakeWei) throw new Error(`deposit mismatch: expected ${gen(stakeWei)}, got ${gen(bal1)}`);
+  console.log("   staking from that balance (no value attached to the bet)");
+  await write("bet", [MARKET, SIDE, stakeWei]);
+  const bal2 = BigInt((await read("get_balance", [account.address.toLowerCase()])) as any);
+  if (bal2 !== 0n) throw new Error(`stake should have been debited, balance is ${gen(bal2)}`);
   const afterBet = await detail();
   const rNow = [afterBet.next_round, afterBet.live_round].find((r: any) => r && r.id === target.id);
   console.log(`   pools → UP ${gen(rNow.up_pool)} / DOWN ${gen(rNow.down_pool)} GEN`);
@@ -121,8 +134,8 @@ async function main() {
 
   console.log("\n4️⃣  Waiting for the round to lock and settle (several minutes)");
   let settled = null;
-  for (let i = 0; i < 90; i++) {
-    await sleep(10000);
+  for (let i = 0; i < 40; i++) {
+    await sleep(30000);
     const d = await detail();
     const hit = (d.history || []).find((r: any) => r.id === target.id);
     if (hit) { settled = hit; break; }
@@ -150,25 +163,30 @@ async function main() {
   console.log("   ✅ one-sided round voided and refunds the full stake (no fee taken)");
 
   console.log("\n6️⃣  Claiming");
-  const before = BigInt((await balance()) as string);
-  await write("claim", [MARKET, target.id]);
-  const after = BigInt((await balance()) as string);
-  console.log(`   wallet delta ${(Number(after - before) / 1e18).toFixed(6)} GEN (incl. gas)`);
-
-  const bets2 = JSON.parse((await read("get_user_bets", [account.address.toLowerCase(), MARKET])) as any);
-  const mine2 = bets2.find((b: any) => b.round_id === target.id);
-  if (mine2.state !== "CLAIMED") throw new Error(`expected CLAIMED, got ${mine2.state}`);
-  console.log("   ✅ marked CLAIMED");
-
-  try {
-    await write("claim", [MARKET, target.id]);
-    throw new Error("double claim should have reverted");
-  } catch (e: any) {
-    if (String(e.message).includes("double claim should")) throw e;
-    console.log("   ✅ double claim correctly rejected");
+  console.log("   winnings should already be credited — there is no claim step");
+  const bal3 = BigInt((await read("get_balance", [account.address.toLowerCase()])) as any);
+  console.log(`   play balance after settlement: ${gen(bal3)} GEN`);
+  if (bal3 !== BigInt(mine.payout)) {
+    throw new Error(`settlement should have credited ${gen(mine.payout)}, balance is ${gen(bal3)}`);
   }
+  if (mine.state !== "REFUNDED") throw new Error(`expected REFUNDED, got ${mine.state}`);
+  console.log("   OK - credited automatically at resolution");
 
-  console.log("\n✅ Smoke test passed — bet, settle, refund and claim all work on-chain.");
+  console.log("   withdrawing back to the wallet");
+  await write("withdraw_all", []);
+  const bal4 = BigInt((await read("get_balance", [account.address.toLowerCase()])) as any);
+  if (bal4 !== 0n) throw new Error(`withdraw_all left ${gen(bal4)} behind`);
+  const walletAfter = BigInt((await balance()) as string);
+  console.log(`   wallet round trip: ${(Number(walletAfter - walletBefore) / 1e18).toFixed(6)} GEN (gas only)`);
+
+  const vault: any = await read("get_vault", []);
+  console.log("   vault:", JSON.stringify(vault));
+  if (BigInt(vault.total_liabilities) !== 0n) {
+    throw new Error(`vault should owe nothing, owes ${gen(vault.total_liabilities)}`);
+  }
+  console.log("   OK - vault owes nothing after the round trip");
+
+  console.log("\n✅ Smoke test passed — deposit, bet, settle, auto-credit and withdraw all work on-chain.");
 }
 
 async function balance(): Promise<string> {

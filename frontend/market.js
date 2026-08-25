@@ -564,8 +564,8 @@ async function refreshBets() {
   // and pause with the tab, because the node's daily request budget is shared with
   // the round keeper.
   setInterval(() => { if (detail) { renderRounds(); tickBetPanel(); } }, 1000);
-  pollWhileVisible(refresh, 20000);
-  pollWhileVisible(refreshSpot, 20000);
+  pollWhileVisible(refresh, 30000);
+  pollWhileVisible(refreshSpot, 30000);
   pollWhileVisible(refreshBets, 60000);
   onVaultChange(() => { if (detail) renderBetPanel(); });
 })();

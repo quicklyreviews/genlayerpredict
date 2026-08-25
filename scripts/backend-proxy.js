@@ -39,6 +39,34 @@ const rawPk = process.env.PRIVATE_KEY || "";
 const privateKey = rawPk.startsWith("0x") ? rawPk : `0x${rawPk}`;
 const account = privateKeyToAccount(privateKey);
 
+// ─── RPC meter ──────────────────────────────────────────────────────
+//
+// The node enforces 500 requests/hour and 5000/day, and exceeding either takes the
+// whole app down until the window rolls. Guessing at consumption was how we blew it
+// twice, so count the real thing: every JSON-RPC round trip, whatever makes it.
+const rpcMeter = { total: 0, byMethod: {}, windowStart: Date.now() };
+const _fetch = global.fetch;
+global.fetch = async (url, opts) => {
+  if (typeof url === "string" && url === RPC_URL && opts?.body) {
+    try {
+      const body = JSON.parse(opts.body);
+      for (const m of Array.isArray(body) ? body : [body]) {
+        rpcMeter.total++;
+        rpcMeter.byMethod[m.method] = (rpcMeter.byMethod[m.method] || 0) + 1;
+      }
+    } catch (e) { rpcMeter.total++; }
+  }
+  return _fetch(url, opts);
+};
+setInterval(() => {
+  const mins = (Date.now() - rpcMeter.windowStart) / 60000;
+  const perHour = Math.round((rpcMeter.total / Math.max(mins, 0.1)) * 60);
+  const top = Object.entries(rpcMeter.byMethod).sort((a, b) => b[1] - a[1]).slice(0, 4)
+    .map(([m, n]) => `${m}=${n}`).join(" ");
+  console.log(`[RPC] ${rpcMeter.total} calls in ${mins.toFixed(1)}min → ~${perHour}/hour of 500  ${top}`);
+  if (perHour > 450) console.warn(`[RPC] ⚠ approaching the hourly cap`);
+}, 300000);
+
 const studioChain = { ...localnet, id: 61999 };
 const client = createClient({ chain: studioChain, endpoint: RPC_URL, account });
 
@@ -73,7 +101,8 @@ function withTimeout(promise, ms) {
 // Read cache. Two jobs: absorb repeat reads inside a short window, and keep serving
 // the last-known value when the RPC is unavailable.
 //
-// The GenLayer Studio RPC allows only ~30 requests/minute. Every browser tab polls
+// The GenLayer Studio RPC caps requests per hour (500) as well as per day (5000).
+// Every browser tab polls
 // several views on a loop and the keeper sweeps every market, so without this the
 // limit is blown within seconds and reads start failing. Contract state only changes
 // when a transaction is accepted (~1 min), so a short TTL costs no real freshness.
@@ -110,7 +139,7 @@ async function handleRead(method, args, { allowStale = true, address = CONTRACT_
 // keeper already needs most of that, so this is as short as the budget allows.
 // Countdowns tick locally in the browser anyway — only pools and prices need the
 // round trip, and those move slowly enough that 15s is imperceptible.
-const PREDICT_TTL_MS = parseInt(process.env.PREDICT_TTL_MS || "15000", 10);
+const PREDICT_TTL_MS = parseInt(process.env.PREDICT_TTL_MS || "30000", 10);
 
 async function handlePredictRead(method, args) {
   if (!PREDICT_ADDRESS) throw new Error("PREDICT_CONTRACT_ADDRESS is not configured");
@@ -286,6 +315,14 @@ async function startKeeper() {
     if (inFlight) return;
     inFlight = true;
     try {
+      // One cheap read decides whether to look at anything else. Scanning every
+      // market unconditionally cost one read per market per sweep, which with the
+      // full listing was ~480 reads an hour — the node allows 500, so the perp
+      // keeper alone starved everything else. With no margin locked there is
+      // nothing to liquidate and nothing worth reading.
+      const vault = await handleRead("get_vault_status", []);
+      if (BigInt(vault.total_margin_locked || "0") === 0n) return;
+
       const marketsRaw = await handleRead("get_all_markets", []);
       const markets = JSON.parse(marketsRaw);
       for (const [symbol, market] of Object.entries(markets)) {
