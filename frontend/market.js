@@ -143,17 +143,23 @@ function myStakeStrip(r, { live = false } = {}) {
     ? `<span class="stake-strip__when">result once the round starts</span>`
     : `<span class="stake-strip__when">result in <b data-tick-result="${r.close_ts}">${fmtCountdown(Math.max(0, untilResult))}</b></span>`;
 
+  // An empty other side is worth saying while betting is still open, not only once
+  // the round has locked and nothing can be done about it. Winnings come from the
+  // losing side's stakes, so with nobody opposite there is nothing to win — the
+  // round refunds however right the call turns out to be. Someone who learns that
+  // only from the settled row reasonably concludes the exchange got it wrong.
+  const otherEmpty = BigInt(mine.side === "UP" ? r.down_pool : r.up_pool) === 0n;
   let standing = "";
-  if (live) {
-    // Provisional only: the round settles on the price at close, not the price now,
-    // and a one-sided round refunds instead of paying. Say so rather than implying
-    // the result is decided.
+  if (otherEmpty) {
+    standing = `<span class="stake-strip__note" style="color:var(--warn)">
+      Nobody has taken ${mine.side === "UP" ? "DOWN" : "UP"} yet. Winnings come from the other
+      side's stakes, so if it stays empty this round refunds your ${genFromWei(mine.amount, 3)} GEN
+      in full${live ? "" : " — the pools can still change before it locks"}.</span>`;
+  } else if (live) {
+    // Provisional only: the round settles on the price at close, not the price now.
     const spot = parseFloat(($("chart-price")?.textContent || "").replace(/[$,]/g, ""));
     const lock = parseFloat(r.lock_price);
-    const otherEmpty = BigInt(mine.side === "UP" ? r.down_pool : r.up_pool) === 0n;
-    if (otherEmpty) {
-      standing = `<span class="stake-strip__note">nobody on the other side yet — refunds if it stays that way</span>`;
-    } else if (isFinite(spot) && isFinite(lock) && lock > 0 && spot !== lock) {
+    if (isFinite(spot) && isFinite(lock) && lock > 0 && spot !== lock) {
       const ahead = (spot > lock) === (mine.side === "UP");
       standing = `<span class="stake-strip__note" style="color:var(--${ahead ? "up" : "down"})">` +
                  `${ahead ? "ahead" : "behind"} right now · settles on the closing price</span>`;
@@ -270,11 +276,15 @@ function myResultCell(r) {
 
   const pick = `<span style="color:var(--${mine.side === "UP" ? "up" : "down"})">${mine.side === "UP" ? "▲" : "▼"}</span>`;
   if (mine.state === "CLAIMABLE" || mine.state === "REFUNDABLE") {
-    return `${pick} <button class="btn btn--primary btn--sm" data-collect="${mine.round_id}">Collect ${genFromWei(mine.payout, 2)}</button>`;
+    const label = mine.state === "REFUNDABLE" ? "Take back" : "Collect";
+    return `${pick} <button class="btn btn--primary btn--sm" data-collect="${mine.round_id}">${label} ${genFromWei(mine.payout, 2)}</button>`;
   }
   if (mine.state === "COLLECTED") {
-    return `${pick} <span class="mono" style="color:var(--up)">+${genFromWei(mine.payout, 3)}</span>
-            <span class="pill pill--resolved">Collected</span>`;
+    // Distinguish a profit from a stake handed back: both are "+", and calling a
+    // refund a win is exactly the confusion the amount alone creates.
+    const refunded = mine.settlement === "VOID";
+    return `${pick} <span class="mono" style="color:var(--${refunded ? "text-dim" : "up"})">+${genFromWei(mine.payout, 3)}</span>
+            <span class="pill pill--resolved">${refunded ? "Stake returned" : "Collected"}</span>`;
   }
   if (mine.state === "LOST") {
     return `${pick} <span class="mono" style="color:var(--down)">−${genFromWei(mine.amount, 3)}</span>`;
@@ -287,8 +297,18 @@ function renderHistory() {
     const d = priceDelta(r.lock_price, r.close_price);
     // A void round still has a price direction, but nobody was paid from it —
     // labelling it by its winner alone would misrepresent what happened.
+    // A refund next to a correct-looking price move reads as the exchange getting it
+    // wrong, so the reason goes on the row rather than into a tooltip nobody opens.
+    // The two causes are quite different: a level price means there was nothing to
+    // call, while an empty other side means the call stood but had no counterparty.
+    const emptySide = BigInt(r.up_pool) === 0n || BigInt(r.down_pool) === 0n;
     const winner = r.settlement === "VOID"
-      ? `<span class="pill pill--draw" title="One side had no bets, or the price was unchanged — all stakes refunded">Refunded</span>`
+      ? `<span class="pill pill--draw">Refunded</span>
+         <div class="hist-note">${
+           r.winner === "DRAW" || d.pct === 0
+             ? "price finished level"
+             : `${r.winner} was right, but ${emptySide ? "nobody took the other side" : "there was no losing pool"}`
+         }</div>`
       : `<span style="color:var(--${r.winner === "UP" ? "up" : "down"});font-weight:600">${r.winner === "UP" ? "▲" : "▼"} ${r.winner}</span>`;
     return `<tr>
       <td class="mono">#${r.id}</td>
@@ -304,6 +324,19 @@ function renderHistory() {
   $("history-body").innerHTML = rows.length
     ? rows.join("")
     : `<tr><td colspan="8" class="empty">No completed rounds yet</td></tr>`;
+  // Say how much is on screen. The contract prunes old rounds, so "all of it" means
+  // all of what still exists — worth stating rather than implying it is everything
+  // that ever happened.
+  const note = $("history-note");
+  if (note) {
+    const mineCount = wallet.account
+      ? rows.filter((_, i) => myBets.some((b) => b.round_id === detail.history[i].id)).length
+      : 0;
+    note.textContent = rows.length
+      ? `${rows.length} round${rows.length === 1 ? "" : "s"} kept on-chain` +
+        (mineCount ? ` · you played ${mineCount}` : "")
+      : "";
+  }
 
   $("history-body").querySelectorAll("[data-collect]").forEach((btn) =>
     btn.addEventListener("click", () => collectRound(btn))
@@ -624,7 +657,7 @@ function renderMyBets() {
   host.innerHTML = `<div class="table-scroll"><table>
     <thead><tr><th>Round</th><th class="t-center">Pick</th><th class="t-center">Stake</th>
     <th class="t-center">Result</th><th class="t-right">Paid</th></tr></thead>
-    <tbody>${myBets.slice(0, 12).map((b) => `
+    <tbody>${myBets.map((b) => `
       <tr>
         <td class="mono">#${b.round_id}</td>
         <td class="t-center" style="color:var(--${b.side === "UP" ? "up" : "down"})">${b.side === "UP" ? "▲" : "▼"}</td>
@@ -668,7 +701,10 @@ async function collectRound(btn) {
 
 async function refresh() {
   try {
-    const raw = await readPredict("get_market_detail", [marketKey, 15]);
+    // Ask for everything the contract still keeps. It prunes to history_limit (40
+    // by default) and the view caps at 50, so 40 is the whole retained record —
+    // asking for 15 threw away rounds that were still there to show.
+    const raw = await readPredict("get_market_detail", [marketKey, 40]);
     const d = typeof raw === "string" ? JSON.parse(raw) : raw;
     if (d.error) {
       $("mkt-title").textContent = "Market not found";

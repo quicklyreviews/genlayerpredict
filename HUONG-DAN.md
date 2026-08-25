@@ -123,8 +123,17 @@ Mạng cần khoảng 1 phút để đồng thuận, nên sàn **đóng cược 
 **2. Market đang "ngủ" thì lệnh đầu tiên khởi động đồng hồ**
 Market chưa ai cược sẽ hiện *"Your bet starts the clock"*. Bạn cược là đồng hồ bắt đầu chạy, và mọi người có đủ thời gian vào cửa ngược lại.
 
-**3. Cược một chiều thì được hoàn tiền, không phải thắng**
-Nếu cả vòng chỉ có mình bạn cược, không có ai bên kia để thắng — sàn **hoàn đủ tiền, không thu phí**. Trạng thái hiện là *Refunded*.
+**3. Đoán đúng mà vẫn chỉ được hoàn tiền — khi không ai vào cửa ngược**
+
+Đây là điều gây khó chịu nhất, nên nói thật rõ:
+
+Tiền thắng **lấy từ tiền của bên thua**. Không ai cược ngược lại thì không có gì để thắng — toàn bộ pool chính là tiền của bạn. Trả lại rồi gọi là "thắng" thì là trả bạn bằng tiền của chính bạn.
+
+Ví dụ thật: giá khoá $79,304 → đóng $79,374, tăng 0.088%. Bạn cược UP — đúng hướng. Nhưng pool DOWN rỗng, nên vòng **hoàn đủ 0.1 GEN, không thu phí**.
+
+Sàn báo trước chứ không để bạn phát hiện lúc đã muộn: **ngay khi bạn đặt cược**, thẻ của vòng sẽ cảnh báo màu vàng nếu cửa ngược đang trống. Còn thời gian cược thì pool vẫn có thể thay đổi.
+
+Dòng kết quả cũng nói rõ lý do: *"UP was right, but nobody took the other side"*.
 
 ---
 

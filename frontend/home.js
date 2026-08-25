@@ -321,18 +321,21 @@ function initSearch() {
  */
 function renderSettled() {
   const section = $("claims-section");
+  // Every settled round, not the first eight. A results list that quietly stops at
+  // an arbitrary count is the same failure as one that hides losses: the player
+  // cannot tell whether they are seeing their record or a sample of it. The section
+  // scrolls instead, so a long history costs height rather than rows.
   const settled = myBets
-    .filter((b) => ["CLAIMABLE", "REFUNDABLE", "COLLECTED", "LOST"].includes(b.state))
-    .slice(0, 8);
+    .filter((b) => ["CLAIMABLE", "REFUNDABLE", "COLLECTED", "LOST"].includes(b.state));
   if (!wallet.account || settled.length === 0) {
     section.classList.add("hidden");
     return;
   }
   section.classList.remove("hidden");
   const waiting = settled.filter((b) => b.state === "CLAIMABLE" || b.state === "REFUNDABLE").length;
-  $("claims-note").textContent = waiting
-    ? `${waiting} waiting to be collected`
-    : "Everything settled has been collected";
+  $("claims-note").textContent =
+    `${settled.length} settled · ` +
+    (waiting ? `${waiting} waiting to be collected` : "all collected");
 
   $("claims-body").innerHTML = settled.map((b) => {
     const lost = b.state === "LOST";
