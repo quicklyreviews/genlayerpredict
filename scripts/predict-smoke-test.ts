@@ -297,7 +297,7 @@ async function main() {
   }
   console.log("   OK - what it holds reconciles with what it owes");
 
-  console.log("\n✅ Smoke test passed — deposit, bet, settle, auto-credit and withdraw all work on-chain.");
+  console.log("\n✅ Smoke test passed — deposit, bet, settle, collect and withdraw all work on-chain.");
 }
 
 async function contractBalance(): Promise<string> {
