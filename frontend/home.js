@@ -177,6 +177,135 @@ function renderGrid() {
   $("list-note").textContent = `${list.length} market${list.length === 1 ? "" : "s"}`;
 }
 
+
+// ─── Coin search ────────────────────────────────────────────────────
+
+/**
+ * Searches the full CoinGecko top-1000 snapshot, not just the markets that exist.
+ *
+ * The list is a static file loaded on first focus rather than on page load: it is
+ * ~175KB and most visits never search, so paying for it up front would slow every
+ * load for a feature few use. Fetching it live from CoinGecko instead was not an
+ * option — their free endpoint drops CORS headers when it rate-limits, so the
+ * search box would break exactly when the site is busy.
+ */
+let coinList = null;
+let coinListState = "idle";
+
+async function loadCoinList() {
+  if (coinList || coinListState === "loading") return coinList;
+  coinListState = "loading";
+  try {
+    const res = await fetch("coins.json");
+    const data = await res.json();
+    coinList = data.coins || [];
+    coinListState = "ready";
+  } catch (e) {
+    coinListState = "error";
+  }
+  return coinList;
+}
+
+/** Ranked so an exact ticker beats a substring — typing "SOL" should not bury
+ *  Solana under every coin with "sol" somewhere in its name. */
+function searchCoins(query, limit = 12) {
+  if (!coinList) return [];
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  const scored = [];
+  for (const c of coinList) {
+    const sym = c.symbol.toLowerCase();
+    const name = (c.name || "").toLowerCase();
+    let score = -1;
+    if (sym === q) score = 0;
+    else if (name === q) score = 1;
+    else if (sym.startsWith(q)) score = 2;
+    else if (name.startsWith(q)) score = 3;
+    else if (sym.includes(q)) score = 4;
+    else if (name.includes(q)) score = 5;
+    if (score >= 0) scored.push({ c, score });
+  }
+  scored.sort((a, b) => a.score - b.score || (a.c.rank ?? 9e9) - (b.c.rank ?? 9e9));
+  return scored.slice(0, limit).map((x) => x.c);
+}
+
+function marketsFor(symbol) {
+  return markets.filter((m) => m.symbol === symbol && m.enabled === 1);
+}
+
+function renderSearch(query) {
+  const host = $("search-results");
+  const clear = $("search-clear");
+  if (!query.trim()) {
+    host.classList.add("hidden");
+    clear.classList.add("hidden");
+    $("market-grid").classList.remove("hidden");
+    document.querySelector(".filters").classList.remove("hidden");
+    return;
+  }
+  clear.classList.remove("hidden");
+  host.classList.remove("hidden");
+  // Hide the browse view while searching so there is one answer on screen, not two.
+  $("market-grid").classList.add("hidden");
+  document.querySelector(".filters").classList.add("hidden");
+
+  if (coinListState === "loading") {
+    host.innerHTML = `<div class="sresults"><div class="search-note">Loading coin list…</div></div>`;
+    return;
+  }
+  if (coinListState === "error") {
+    host.innerHTML = `<div class="sresults"><div class="search-note">
+      Could not load the coin list. Run <code>npm run coins</code> to regenerate
+      <code>frontend/coins.json</code>.</div></div>`;
+    return;
+  }
+
+  const hits = searchCoins(query);
+  if (hits.length === 0) {
+    host.innerHTML = `<div class="sresults"><div class="search-note">
+      Nothing matching “${query}” in the top 1,000 by market cap.</div></div>`;
+    return;
+  }
+
+  host.innerHTML = `<div class="sresults">${hits.map((c) => {
+    const mine = marketsFor(c.symbol);
+    const right = mine.length
+      ? mine.map((m) => `<span class="sresult__tag sresult__tag--live">${fmtHorizon(m.horizon_seconds)}</span>`).join("")
+      : c.tradeable === false
+      ? `<span class="sresult__tag">Not on Binance</span>`
+      : `<span class="sresult__tag">No market yet</span>`;
+    const href = mine.length ? `market.html?m=${encodeURIComponent(mine[0].key)}` : null;
+    const inner = `
+      ${coinLogo(c.symbol, 30)}
+      <div>
+        <div class="sresult__name">${c.name}</div>
+        <div class="sresult__meta">${c.symbol}${c.rank ? ` · rank #${c.rank}` : ""}</div>
+      </div>
+      <div class="sresult__right">${right}</div>`;
+    return href
+      ? `<a class="sresult" href="${href}">${inner}</a>`
+      : `<div class="sresult" style="cursor:default">${inner}</div>`;
+  }).join("")}
+  ${hits.some((c) => marketsFor(c.symbol).length === 0)
+    ? `<div class="search-note">Coins without a market are not being run yet — the owner
+       lists one with <code>add_market</code>. Only assets quoted on Binance can be
+       settled, since that is the contract's primary price source.</div>` : ""}
+  </div>`;
+}
+
+function initSearch() {
+  const input = $("coin-search");
+  if (!input) return;
+  const run = () => renderSearch(input.value);
+  input.addEventListener("focus", async () => { await loadCoinList(); run(); }, { once: false });
+  input.addEventListener("input", async () => {
+    if (!coinList) { renderSearch(input.value); await loadCoinList(); }
+    run();
+  });
+  $("search-clear").addEventListener("click", () => { input.value = ""; run(); input.focus(); });
+  input.addEventListener("keydown", (e) => { if (e.key === "Escape") { input.value = ""; run(); } });
+}
+
 // ─── Recent settlements ─────────────────────────────────────────────
 
 /**
@@ -259,6 +388,7 @@ async function refreshMarkets() {
   mountHeader("home");
   await loadConfig();
   await refreshMarkets();
+  initSearch();
   await autoReconnect();
   await refreshBets();
 

@@ -24,6 +24,17 @@
 
   <div id="fund-prompt" class="fund-prompt hidden" style="margin-bottom:18px"></div>
 
+  <div class="search">
+    <svg class="search__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+      <circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>
+    </svg>
+    <input id="coin-search" type="search" autocomplete="off" spellcheck="false"
+           placeholder="Search 1,000+ coins — try SOL, pepe, chainlink…"
+           aria-label="Search coins"/>
+    <button id="search-clear" class="search__clear hidden" aria-label="Clear search">✕</button>
+  </div>
+  <div id="search-results" class="hidden"></div>
+
   <div class="filters">
     <div class="chips" id="horizon-chips" role="tablist" aria-label="Horizon"></div>
     <div class="chips" id="asset-chips" role="tablist" aria-label="Asset"></div>
