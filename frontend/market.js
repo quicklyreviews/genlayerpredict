@@ -11,8 +11,7 @@ import {
   CONSENSUS_BUFFER_SECONDS, coinLogo, pollWhileVisible, refreshVaultChip, vaultState,
   openVaultModal, onVaultChange,
 } from './shared.js';
-import { sessionActive, sessionWrite, sessionWaitAccepted, refreshSessionGas,
-         session, onSessionChange, loadSession } from './session.js';
+import { loadSession, refreshSessionGas } from './session.js';
 import * as results from './results.js';
 
 const marketKey = new URLSearchParams(location.search).get("m") || "BTC-5m";
@@ -423,7 +422,6 @@ function panelSignature() {
     submitting ? "busy" : "idle",
     vaultState.balance === 0n ? "unfunded" : "funded",
     isDormant(detail?.next_round) ? "dormant" : "timed",
-    sessionActive() ? "instant" : "popup",
   ].join("|");
 }
 
@@ -567,11 +565,9 @@ function renderBetPanel() {
       </div>`}
 
     <button class="btn btn--primary btn--block" id="submit-bet" ${!selectedSide || submitting ? "disabled" : ""}>
-      ${submitting ? "Confirming…" : selectedSide ? `${sessionActive() ? "⚡ " : ""}Bet ${stake} GEN on ${selectedSide}` : "Pick UP or DOWN"}
+      ${submitting ? "Confirming…" : selectedSide ? `Bet ${stake} GEN on ${selectedSide}` : "Pick UP or DOWN"}
     </button>
-    ${sessionActive()
-      ? `<p class="bet-mode">⚡ Instant play — signed here, no wallet prompt</p>`
-      : `<p class="bet-mode bet-mode--slow">Your wallet will ask you to approve. <button class="linkish" id="enable-instant">Turn on instant play</button> to skip that.</p>`}
+    <p class="bet-mode bet-mode--slow">Your wallet will ask you to approve this bet.</p>
 
     ${isDormant(round) ? `
       <div class="notice notice--info" style="margin-top:10px">
@@ -606,7 +602,6 @@ function renderBetPanel() {
   $("pick-up").addEventListener("click", () => { selectedSide = "UP"; renderBetPanel(); });
   $("pick-down").addEventListener("click", () => { selectedSide = "DOWN"; renderBetPanel(); });
   $("submit-bet").addEventListener("click", submitBet);
-  $("enable-instant")?.addEventListener("click", () => openVaultModal("instant"));
 }
 
 /** Re-render the payout box without stealing focus from the stake input. */
@@ -653,19 +648,20 @@ async function submitBet() {
   submitting = true;
   renderBetPanel();
   try {
-    // With a session key the bet is signed here and now, with no popup — which is
-    // the point: a wallet prompt takes long enough that the betting window can
-    // close while it sits on screen.
-    const instant = sessionActive();
-    const hash = instant
-      ? await sessionWrite(CONFIG.predictAddress, "bet", [marketKey, selectedSide, wei])
-      : await write(CONFIG.predictAddress, "bet", [marketKey, selectedSide, wei]);
+    // Signed by the wallet that owns the money, always.
+    //
+    // There used to be a "session key" shortcut that signed bets locally to skip the
+    // wallet prompt. It could never have worked: bet() debits the play balance of
+    // whoever signs, the session wallet was only ever sent native GEN for gas and
+    // never deposited, so its play balance was zero while the deposit sat under the
+    // main address. Every instant bet failed for insufficient balance, and the two
+    // addresses had no path between them.
+    const hash = await write(CONFIG.predictAddress, "bet", [marketKey, selectedSide, wei]);
     toast(
-      `${instant ? "Bet placed instantly" : "Bet sent"} — <a href="${txLink(hash)}" target="_blank">view tx</a>. Waiting for consensus…`,
+      `Bet sent — <a href="${txLink(hash)}" target="_blank">view tx</a>. Waiting for consensus…`,
       "pending", { html: true, timeout: 12000 }
     );
-    await (instant ? sessionWaitAccepted(hash) : waitAccepted(hash));
-    if (instant) refreshSessionGas();
+    await waitAccepted(hash);
     toast(`${stake} GEN on ${selectedSide} confirmed for round #${round.id}`, "success");
     selectedSide = null;
     await Promise.all([refresh(), refreshBets(), refreshVaultChip({ fresh: true })]);
@@ -783,9 +779,8 @@ async function refreshBets() {
   await refresh();
   await refreshSpot();
   await autoReconnect();
-  // Restore instant play before anything renders. Without this a returning player
-  // sees it switched off, and turning it back on would mint a second key while the
-  // first one still held their funds.
+  // Load any session wallet a previous version created, purely so the Play balance
+  // dialog can offer to send its funds back. Nothing signs with it any more.
   if (loadSession()) refreshSessionGas();
   await results.primeSeen();
   await results.refresh();
@@ -804,5 +799,4 @@ async function refreshBets() {
   pollWhileVisible(refreshBets, 60000);
   pollWhileVisible(() => results.refresh(), 30000);
   onVaultChange(() => { if (detail) renderBetPanel(); });
-  onSessionChange(() => { if (detail) renderBetPanel(); });
 })();

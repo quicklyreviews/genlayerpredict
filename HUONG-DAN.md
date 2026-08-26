@@ -183,26 +183,15 @@ Những lúc đó sàn **nói trước ngay trên thẻ vòng**, màu vàng, ch�
 
 ---
 
-## Chơi không cần ký từng lệnh
+## Mỗi lệnh cược đều ký bằng ví của bạn
 
-Mặc định mỗi lệnh cược ví sẽ hỏi xác nhận. Trên GenLayer việc đó phiền thật sự: popup có thể sống lâu hơn cửa sổ cược.
+Đặt cược là ví hỏi xác nhận. Đây là chủ ý, không phải thiếu sót.
 
-**Bật ⚡ Instant play:** ô Play balance → tab **⚡ Instant play** → nhập số GEN → bật.
+Contract trừ tiền từ **số dư của địa chỉ ký lệnh**. Nên người ký bắt buộc phải là người đang giữ tiền — và chỉ ví của bạn mới vừa là người ký vừa là người giữ.
 
-Từ đó mọi lệnh **tự ký, không popup**.
+> **Bản cũ từng có "Instant play"** — tạo một khoá tạm trong trình duyệt để ký hộ, khỏi popup. **Nó không thể hoạt động được**: tiền bạn nạp nằm dưới địa chỉ ví chính, còn ví tạm chỉ được cấp GEN trả phí — nó ký thì contract tra số dư của *nó*, thấy 0, và lệnh hỏng. Đã gỡ bỏ.
 
-### Đổi lại là gì
-
-Trình duyệt giữ một khoá riêng cho ví tạm này. **Bất kỳ thứ gì chạy được mã trên trang đều lấy được tiền trong ví tạm** — extension độc, lỗ hổng XSS.
-
-Vì vậy:
-
-- **Chỉ nạp số tiền định chơi**, coi như tiền lẻ trong túi
-- Ví chính của bạn **ký đúng một lần** và không để lại quyền gì tái sử dụng được
-- Mất nhiều nhất là đúng số đã nạp vào ví tạm
-- Khoá **không rời khỏi trình duyệt** — không gửi lên server, người vận hành không tiêu hộ được
-
-Chơi xong bấm **Cash out and turn off** để quét tiền về ví chính và xoá khoá.
+Nếu trước đây bạn đã nạp GEN vào ví tạm đó: **ô Play balance → tab Session wallet** sẽ hiện số còn lại kèm nút trả về ví chính.
 
 ---
 

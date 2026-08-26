@@ -321,11 +321,17 @@ export function shortAddr(a) {
 }
 
 /**
- * The "instant play" panel: turn a session key on, fund it, or cash it out.
+ * What is left of "instant play": a way to get your money back out of it.
  *
- * Written to be honest about the trade rather than to sell it. A key that lives in
- * the browser is a real exposure, so the panel says so in the same breath as the
- * benefit, and steers towards funding a small amount.
+ * The feature signed bets with a throwaway key in the browser so they needed no
+ * wallet prompt. It could not have worked. bet() debits the play balance of
+ * whoever signs, and the session wallet was only ever sent native GEN for gas —
+ * it never deposited, so its play balance was zero while the money sat under the
+ * main address. Every instant bet failed for insufficient balance.
+ *
+ * Bets are signed by the wallet that owns the funds now, which is the only
+ * arrangement where the signer and the balance are the same account. This panel
+ * remains solely so anyone who funded a session wallet before can sweep it back.
  */
 async function renderInstantPanel(host) {
   const mod = await import("./session.js");
@@ -335,99 +341,35 @@ async function renderInstantPanel(host) {
   await mod.refreshSessionGas();
   const s = mod.sessionSummary();
 
-  if (!s.active) {
+  if (!s.active || s.gas === 0n) {
     el.innerHTML = `
       <p class="modal__intro" style="padding-left:0;padding-right:0">
-        Every bet normally needs a wallet signature. On a chain that takes a minute to
-        agree, that prompt can outlast the betting window. Instant play creates a
-        throwaway key in this browser that signs for you — one approval to fund it,
-        then no prompts at all.
+        Bets are signed by your own wallet, so every one asks for approval. That is
+        deliberate: the account that signs has to be the account holding the balance,
+        and only your wallet can be both.
       </p>
-      <div class="notice notice--warn" style="margin:10px 0">
-        <span>🔑</span>
-        <span>The key is stored in this browser, so treat it like cash in a pocket.
-        Fund it with what you plan to play with, not your balance. Your main wallet
-        signs once and is never otherwise exposed.</span>
-      </div>
-      <div class="field">
-        <label class="field__label" for="vm-fund">Fund with</label>
-        <div class="input-wrap">
-          <input id="vm-fund" type="number" min="0" step="0.1" value="1" inputmode="decimal"/>
-          <span class="input-wrap__suffix">GEN</span>
-        </div>
-        <p class="modal__note" style="text-align:left">Covers both your stakes and the
-        transaction fees the session wallet pays from here on.</p>
-      </div>
-      <p id="vm-instant-error" class="modal__error"></p>
-      <button id="vm-enable" class="btn btn--primary btn--block">Turn on instant play</button>`;
-
-    document.getElementById("vm-enable").addEventListener("click", async () => {
-      const btn = document.getElementById("vm-enable");
-      const err = document.getElementById("vm-instant-error");
-      const amount = document.getElementById("vm-fund").value;
-      err.textContent = "";
-      if (!(Number(amount) > 0)) { err.textContent = "Enter an amount above zero."; return; }
-      btn.disabled = true;
-      btn.textContent = "Confirm in wallet…";
-      try {
-        mod.createSession();
-        const hash = await mod.fundSession(amount);
-        toast(`Funding the session wallet — <a href="${txLink(hash)}" target="_blank">view tx</a>`,
-              "pending", { html: true, timeout: 10000 });
-        // The transfer needs to land before anything can be signed against it.
-        for (let i = 0; i < 40; i++) {
-          await new Promise((r) => setTimeout(r, 5000));
-          const bal = await mod.refreshSessionGas();
-          if (bal > 0n) break;
-        }
-        toast("Instant play is on — bets no longer need a signature", "success");
-        renderInstantPanel(host);
-      } catch (e) {
-        err.textContent = e.message || "Could not fund the session wallet";
-        btn.disabled = false;
-        btn.textContent = "Turn on instant play";
-      }
-    });
+      <p class="modal__note" style="text-align:left">
+        Nothing to recover here — no session wallet on this browser holds funds.
+      </p>`;
     return;
   }
 
   el.innerHTML = `
-    <div class="stat-row"><span>Status</span><b style="color:var(--up)">⚡ On</b></div>
+    <div class="notice notice--warn" style="margin-bottom:12px">
+      <span>🔑</span>
+      <span>A session wallet on this browser still holds GEN. It was created for a
+      shortcut that has been removed — bets are signed by your own wallet now —
+      so this money is doing nothing. Send it back.</span>
+    </div>
     <div class="stat-row"><span>Session wallet</span>
       <b class="mono" style="font-size:11.5px">${s.address.slice(0, 10)}…${s.address.slice(-6)}</b></div>
-    <div class="stat-row"><span>Left for fees</span>
-      <b class="mono" style="${s.lowGas ? "color:var(--warn)" : ""}">${genFromWei(s.gas, 4)} GEN</b></div>
-    ${s.lowGas ? `<div class="notice notice--warn" style="margin-top:10px"><span>⛽</span>
-      <span>Running low. Top up, or a bet will fail for want of a fee.</span></div>` : ""}
-    <div class="field" style="margin-top:14px">
-      <label class="field__label" for="vm-topup">Top up</label>
-      <div class="input-wrap">
-        <input id="vm-topup" type="number" min="0" step="0.1" value="1" inputmode="decimal"/>
-        <span class="input-wrap__suffix">GEN</span>
-      </div>
-    </div>
+    <div class="stat-row"><span>Holding</span>
+      <b class="mono">${genFromWei(s.gas, 4)} GEN</b></div>
     <p id="vm-instant-error" class="modal__error"></p>
-    <button id="vm-topup-btn" class="btn btn--primary btn--block">Add funds</button>
-    <button id="vm-sweep" class="btn btn--ghost btn--block" style="margin-top:8px">
-      Cash out and turn off</button>
-    <p class="modal__note">Cashing out returns the remaining GEN to the wallet that
-    funded it and forgets the key.</p>`;
-
-  document.getElementById("vm-topup-btn").addEventListener("click", async () => {
-    const btn = document.getElementById("vm-topup-btn");
-    const err = document.getElementById("vm-instant-error");
-    err.textContent = "";
-    btn.disabled = true; btn.textContent = "Confirm in wallet…";
-    try {
-      const hash = await mod.fundSession(document.getElementById("vm-topup").value);
-      toast(`Top-up sent — <a href="${txLink(hash)}" target="_blank">view tx</a>`, "pending", { html: true });
-      for (let i = 0; i < 30; i++) { await new Promise((r) => setTimeout(r, 5000)); await mod.refreshSessionGas(); }
-      renderInstantPanel(host);
-    } catch (e) {
-      err.textContent = e.message || "Top-up failed";
-      btn.disabled = false; btn.textContent = "Add funds";
-    }
-  });
+    <button id="vm-sweep" class="btn btn--primary btn--block" style="margin-top:12px">
+      Return ${genFromWei(s.gas, 4)} GEN to my wallet</button>
+    <p class="modal__note">Sends the remaining GEN back to the wallet that funded it,
+    less the fee for that transaction, and forgets the key.</p>`;
 
   document.getElementById("vm-sweep").addEventListener("click", async () => {
     const btn = document.getElementById("vm-sweep");
@@ -442,7 +384,7 @@ async function renderInstantPanel(host) {
       renderInstantPanel(host);
     } catch (e) {
       err.textContent = e.message || "Could not return the funds";
-      btn.disabled = false; btn.textContent = "Cash out and turn off";
+      btn.disabled = false; btn.textContent = "Return to my wallet";
     }
   });
 }
@@ -683,7 +625,7 @@ export function openVaultModal(mode = "deposit") {
       <div class="modal__tabs">
         <button class="modal__tab${mode === "deposit" ? " is-active" : ""}" data-mode="deposit">Deposit</button>
         <button class="modal__tab${mode === "withdraw" ? " is-active" : ""}" data-mode="withdraw">Withdraw</button>
-        <button class="modal__tab${mode === "instant" ? " is-active" : ""}" data-mode="instant">⚡ Instant play</button>
+        <button class="modal__tab${mode === "instant" ? " is-active" : ""}" data-mode="instant">Session wallet</button>
       </div>
       <div class="modal__body" id="vm-money">
         <div class="stat-row">
