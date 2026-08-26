@@ -9,19 +9,37 @@ Toàn bộ tiền trong hướng dẫn này là **GEN testnet** — không phả
 
 ### Bước 1 — Mở sàn
 
+Cần **hai cửa sổ terminal**, mở cả hai rồi để nguyên.
+
+Cửa sổ 1 — backend và keeper (bắt buộc, không có nó thì vòng chơi không chạy):
+
 ```bash
-npm run backend      # cửa sổ 1: giữ nguyên, đừng đóng
+npm run backend
 ```
 
-Mở thư mục `frontend/` bằng một web server bất kỳ, hoặc:
+Cửa sổ 2 — giao diện:
 
 ```bash
-npx serve frontend -l 5173    # cửa sổ 2
+npx serve frontend -l 5173
 ```
 
 Vào **http://localhost:5173**
 
-> **Lưu ý:** đóng cửa sổ terminal là sàn dừng. Vòng chơi sẽ đứng cho tới khi bạn chạy lại `npm run backend`.
+> **Đóng terminal là sàn dừng.** Vòng chơi đứng cho tới khi chạy lại `npm run backend` — nó tự bắt kịp mọi vòng đang tồn đọng.
+
+### Kiểm tra sàn đã sẵn sàng
+
+```bash
+curl http://localhost:3005/api/config
+```
+
+Phải thấy địa chỉ contract. Nếu không có gì trả về thì backend chưa chạy.
+
+Muốn kiểm toàn tuyến trên chuỗi thật (nạp → cược → chốt → nhận → rút), mất khoảng 10 phút:
+
+```bash
+npm run smoke
+```
 
 ### Bước 2 — Kết nối ví
 

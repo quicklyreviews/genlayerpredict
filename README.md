@@ -7,6 +7,37 @@ Two crypto trading products on **GenLayer** — the AI-powered blockchain — sh
 
 Both fetch prices with GenLayer's **Intelligent Contracts** and **Equivalence Principle** — **no Chainlink, no oracle, no admin price input**.
 
+## Live deployment
+
+Studionet (chain 61999). Verified end to end on the addresses below.
+
+| | |
+|---|---|
+| Prediction market | `0x1c06C78ed6b17e4126f11b9d5361EE886F1e2D11` |
+| Perp exchange | `0x91Eee37BeDAfcF15a64a53F93236Cec84AF3a7B8` |
+| House backstop | 5 GEN funded, 0.25 GEN cap per round |
+
+Run it:
+
+```bash
+npm run backend                 # terminal 1 — read proxy + both keepers
+npx serve frontend -l 5173      # terminal 2 — the UI
+```
+
+Then open http://localhost:5173. Closing terminal 1 stops the rounds; restarting
+it catches up on everything outstanding.
+
+Prove it works against the real chain — deposit, bet, settle, collect, withdraw,
+and a solvency reconciliation, about ten minutes:
+
+```bash
+npm run smoke
+```
+
+Most recent run: a lone 0.2 GEN bet on BTC-5m, the house took the empty DOWN side,
+the round settled PAID at $78,391 → $78,606, and 0.2 staked returned 0.388 — 1.94x.
+Collecting twice was rejected, and holdings reconciled with debts.
+
 | Page | What it is |
 |---|---|
 | `index.html` | Market list — filter by horizon and coin, live countdowns and odds |
