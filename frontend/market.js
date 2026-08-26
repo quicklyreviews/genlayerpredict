@@ -143,18 +143,30 @@ function myStakeStrip(r, { live = false } = {}) {
     ? `<span class="stake-strip__when">result once the round starts</span>`
     : `<span class="stake-strip__when">result in <b data-tick-result="${r.close_ts}">${fmtCountdown(Math.max(0, untilResult))}</b></span>`;
 
-  // An empty other side is worth saying while betting is still open, not only once
-  // the round has locked and nothing can be done about it. Winnings come from the
-  // losing side's stakes, so with nobody opposite there is nothing to win — the
-  // round refunds however right the call turns out to be. Someone who learns that
-  // only from the settled row reasonably concludes the exchange got it wrong.
+  // Whether an empty other side matters now depends on the house backstop. If the
+  // house will take it, the round pays normally and there is nothing to warn about
+  // — saying "this will refund" would be wrong. If the backstop is out of capital
+  // or capped out, the old warning still applies, and it belongs here rather than
+  // in the settled row where it arrives too late to matter.
+  const otherSide = mine.side === "UP" ? "DOWN" : "UP";
   const otherEmpty = BigInt(mine.side === "UP" ? r.down_pool : r.up_pool) === 0n;
+  const housed = BigInt(r.house_stake || 0) > 0n && r.house_side === otherSide;
+  const wouldHouse = BigInt(r.house_would_seed || 0) > 0n;
   let standing = "";
-  if (otherEmpty) {
+  if (housed) {
+    standing = `<span class="stake-strip__note">
+      Nobody took ${otherSide}, so the house is covering it with
+      ${genFromWei(r.house_stake, 3)} GEN — this round pays out normally.</span>`;
+  } else if (otherEmpty && wouldHouse) {
+    standing = `<span class="stake-strip__note">
+      Nobody has taken ${otherSide} yet. If it stays empty the house covers it, so
+      you are playing for a real payout either way.</span>`;
+  } else if (otherEmpty) {
     standing = `<span class="stake-strip__note" style="color:var(--warn)">
-      Nobody has taken ${mine.side === "UP" ? "DOWN" : "UP"} yet. Winnings come from the other
-      side's stakes, so if it stays empty this round refunds your ${genFromWei(mine.amount, 3)} GEN
-      in full${live ? "" : " — the pools can still change before it locks"}.</span>`;
+      Nobody has taken ${otherSide}, and the house backstop cannot cover this round.
+      Winnings come from the other side's stakes, so unless someone takes ${otherSide}
+      this refunds your ${genFromWei(mine.amount, 3)} GEN in
+      full${live ? "" : " — the pools can still change before it locks"}.</span>`;
   } else if (live) {
     // Provisional only: the round settles on the price at close, not the price now.
     const spot = parseFloat(($("chart-price")?.textContent || "").replace(/[$,]/g, ""));
@@ -211,10 +223,27 @@ function nextCard(r) {
         ${cd}
         ${myStakeStrip(r)}
         ${note}
+        ${houseNote(r)}
         ${poolRows(r)}
         <div class="pool-row"><span>Locks at</span><b>${fmtClock(r.lock_ts)}</b></div>
       </div>
     </div>`;
+}
+
+/** A one-line note when the house has taken, or would take, the empty side. */
+function houseNote(r) {
+  if (BigInt(r.house_stake || 0) > 0n) {
+    return `<div class="notice notice--info"><span>⚖</span><span>Nobody took
+      <b>${r.house_side}</b>, so the house staked ${genFromWei(r.house_stake, 3)} GEN on it.
+      The round settles and pays normally.</span></div>`;
+  }
+  if (BigInt(r.house_would_seed || 0) > 0n) {
+    const empty = BigInt(r.up_pool) === 0n ? "UP" : "DOWN";
+    return `<div class="notice notice--info"><span>⚖</span><span>No bets on
+      <b>${empty}</b> yet. If nobody takes it before the lock, the house will — so this
+      round pays out rather than refunding.</span></div>`;
+  }
+  return "";
 }
 
 function liveCard(r) {
@@ -233,6 +262,7 @@ function liveCard(r) {
           <div class="countdown__label">${toClose > 0 ? "until settlement" : "settling…"}</div>
         </div>
         ${myStakeStrip(r, { live: true })}
+        ${houseNote(r)}
         <div class="pricebox">
           <div class="priceline"><span>Locked price</span><b>${fmtUsd(r.lock_price)}</b></div>
           <div class="priceline"><span>Now</span><b>${spot}</b></div>
@@ -347,9 +377,13 @@ function renderHistory() {
 
 /**
  * What this stake would return if the chosen side wins, given the pools as they
- * stand. Mirrors the contract, including the void rule: with the other side empty
- * the round refunds instead of paying out, so the honest projection is 1.00x rather
- * than the sub-1x number the raw parimutuel formula would produce.
+ * stand.
+ *
+ * Mirrors the contract, including the house backstop: with the other side empty the
+ * house matches this stake up to its per-round cap, so the projection is the real
+ * two-sided payout rather than a refund. Only when the backstop cannot cover the
+ * round does 1.00x become the honest number — quoting the raw parimutuel formula
+ * there would advertise something below 1x that can never be paid.
  */
 function estimatePayout(round, side, stakeGen) {
   const amount = Number(stakeGen);
@@ -358,16 +392,21 @@ function estimatePayout(round, side, stakeGen) {
   const down = Number(BigInt(round.down_pool)) / 1e18;
   const myUp = side === "UP" ? up + amount : up;
   const myDown = side === "DOWN" ? down + amount : down;
-  const opposing = side === "UP" ? myDown : myUp;
+  let opposing = side === "UP" ? myDown : myUp;
+  const winnerPool = side === "UP" ? myUp : myDown;
+  let housed = 0;
   if (opposing <= 0) {
-    return { payout: amount, multiplier: 1, wouldVoid: true };
+    const cap = Number(BigInt(round.mm_cap || 0)) / 1e18;
+    const free = Number(BigInt(round.mm_free || 0)) / 1e18;
+    housed = Math.min(winnerPool, cap, free);
+    if (housed <= 0) return { payout: amount, multiplier: 1, wouldVoid: true, housed: 0 };
+    opposing = housed;
   }
   const feeRate = detail.market.fee_bps / 10000;
-  const total = myUp + myDown;
-  const winnerPool = side === "UP" ? myUp : myDown;
+  const total = winnerPool + opposing;
   const distributable = total * (1 - feeRate);
   const payout = (amount / winnerPool) * distributable;
-  return { payout, multiplier: payout / amount, wouldVoid: false };
+  return { payout, multiplier: payout / amount, wouldVoid: false, housed };
 }
 
 /** Identifies the *structure* of the panel. The countdown ticks every second, but
@@ -506,17 +545,21 @@ function renderBetPanel() {
     ${est ? `
       <div class="payout-preview" style="margin-bottom:12px">
         ${est.wouldVoid ? `
-          <div class="row"><span>Nobody is on the other side yet</span></div>
+          <div class="row"><span>Nobody is on the other side</span></div>
           <div class="row"><span>If it stays that way</span><b>Refunded in full</b></div>
           <div class="row" style="color:var(--text-muted);font-size:11.5px;border-top:1px solid rgba(255,255,255,0.08);padding-top:5px;margin-top:2px">
-            <span>A round with one empty side is void — you get your ${Number(stake)} GEN back, win or lose.
-            Real odds appear once someone takes the other side.</span>
+            <span>The house normally covers an empty side, but it cannot back a round
+            this size right now — so this one would void and return your ${Number(stake)} GEN,
+            win or lose. Real odds appear if someone takes the other side.</span>
           </div>` : `
           <div class="row"><span>If ${selectedSide} wins</span><b style="color:var(--up)">+${(est.payout - Number(stake)).toFixed(3)} GEN</b></div>
           <div class="row"><span>You'd receive</span><b>${est.payout.toFixed(3)} GEN</b></div>
           <div class="row"><span>Effective multiplier</span><b>${est.multiplier.toFixed(2)}x</b></div>
           <div class="row" style="color:var(--text-muted);font-size:11.5px;border-top:1px solid rgba(255,255,255,0.08);padding-top:5px;margin-top:2px">
-            <span>Estimate only — the multiplier moves as others bet</span>
+            <span>${est.housed > 0
+              ? `Nobody is on the other side, so the house would match you with
+                 ${est.housed.toFixed(3)} GEN. If real bets arrive the odds move with them.`
+              : "Estimate only — the multiplier moves as others bet"}</span>
           </div>`}
       </div>` : `
       <div class="notice notice--info" style="margin-bottom:12px">

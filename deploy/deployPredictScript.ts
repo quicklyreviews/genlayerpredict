@@ -54,9 +54,22 @@ async function main() {
   });
   const schemaData: any = await schemaRes.json();
   if (schemaData.error) {
-    const m = String(schemaData.error.message || "").match(/"message": "([^"]*)"/);
+    const err = schemaData.error;
+    const raw = String(err.message || "");
+    // A quota rejection is not a contract problem, and reporting it as one sends
+    // you hunting through the source for a syntax error that is not there. This
+    // cost a real debugging detour once already.
+    if (err.code === -32029 || /rate limit/i.test(raw)) {
+      const wait = err.data?.retry_after_seconds;
+      throw new Error(
+        `The node refused the request: ${raw}\n` +
+          `   The contract was never validated — this is a quota limit, not a code problem.` +
+          (wait ? `\n   Retry in about ${Math.ceil(wait / 60)} minute(s).` : "")
+      );
+    }
+    const m = raw.match(/"message": "([^"]*)"/);
     throw new Error(
-      `GenVM rejected the contract: ${m ? m[1] : "unknown validation error"}\n` +
+      `GenVM rejected the contract: ${m ? m[1] : raw || "unknown validation error"}\n` +
         `   Hint: line 1 must start with a version token, the { "Depends": ... } comment\n` +
         `   must be line 2, and no comment may follow it.`
     );
@@ -97,19 +110,31 @@ async function main() {
   const contractAddress = receipt.contract_address || receipt.to;
 
   console.log("   🔍 Verifying the contract responds on-chain...");
+  // get_owner alone is too weak a check: it reads one field set in the constructor
+  // and passes even when the rest of storage is unreadable. A field assigned in
+  // __init__ but never declared at class level does exactly that — a deploy reported
+  // success while get_vault threw on every call. So probe views that walk real
+  // state, and treat any of them failing as a failed deploy.
+  const PROBES = ["get_owner", "get_vault", "get_mm", "get_stats"];
   let verified = false;
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < 12 && !verified; i++) {
     try {
-      const owner = await client.readContract({ address: contractAddress, functionName: "get_owner", args: [] } as any);
-      console.log(`   ✅ Contract live — owner: ${owner}`);
+      const results: Record<string, unknown> = {};
+      for (const fn of PROBES) {
+        results[fn] = await client.readContract({ address: contractAddress, functionName: fn, args: [] } as any);
+      }
+      console.log(`   ✅ Contract live — owner: ${results.get_owner}`);
+      console.log(`   ✅ State readable — ${PROBES.length} views answered`);
       verified = true;
-      break;
-    } catch (e) {
+    } catch (e: any) {
+      if (i === 11) {
+        throw new Error(
+          `Contract deployed at ${contractAddress} but its state is not readable: ${e.message}\n` +
+            `   A storage field assigned in __init__ must also be declared at class level.`
+        );
+      }
       await new Promise((r) => setTimeout(r, 5000));
     }
-  }
-  if (!verified) {
-    throw new Error(`Transaction landed but no contract responds at ${contractAddress}`);
   }
 
   console.log("\n✅ PredictMarket deployed successfully!");

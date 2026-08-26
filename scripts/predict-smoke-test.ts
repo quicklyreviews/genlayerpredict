@@ -205,14 +205,44 @@ async function main() {
   if (!mine) throw new Error("bet not found in user bets");
   console.log(`   state=${mine.state} payout=${gen(mine.payout)} GEN staked=${gen(mine.amount)} GEN`);
 
-  // A single bettor makes the round one-sided, so it must void and refund in full.
-  if (settled.settlement !== "VOID") {
-    throw new Error(`expected VOID settlement for a one-sided round, got ${settled.settlement}`);
+  // A single bettor leaves one side empty, which is what the house backstop exists
+  // for. Either it covered the round — in which case this is a real bet with a real
+  // outcome — or it could not, and the round voids and refunds as it used to. Both
+  // are correct; which one applies is decided by the backstop's capital and cap.
+  const houseStake = BigInt(settled.house_stake || "0");
+  const stake = BigInt(mine.amount);
+  if (houseStake > 0n) {
+    console.log(`   house took ${settled.house_side} with ${gen(houseStake)} GEN`);
+    if (settled.settlement !== "PAID") {
+      throw new Error(`a covered round must settle PAID, got ${settled.settlement}`);
+    }
+    if (settled.house_side === SIDE) {
+      throw new Error(`house took ${settled.house_side}, the same side as the bettor`);
+    }
+    if (settled.winner === SIDE) {
+      // Won against the house: the payout is the whole pool less the fee. With an
+      // even match that is close to 2x, and must always beat the stake — a "win"
+      // that returns less than it risked would be worse than the old refund.
+      if (BigInt(mine.payout) <= stake) {
+        throw new Error(`winning bet paid ${gen(mine.payout)}, no more than the ${gen(stake)} staked`);
+      }
+      const x = Number(BigInt(mine.payout) * 1000n / stake) / 1000;
+      console.log(`   ✅ beat the house — ${gen(mine.payout)} GEN back on ${gen(stake)} staked (${x.toFixed(2)}x)`);
+    } else {
+      if (BigInt(mine.payout) !== 0n) {
+        throw new Error(`losing bet should pay nothing, got ${gen(mine.payout)}`);
+      }
+      console.log(`   ✅ lost to the house — stake forfeited, which is the other half of a real bet`);
+    }
+  } else {
+    if (settled.settlement !== "VOID") {
+      throw new Error(`uncovered one-sided round should VOID, got ${settled.settlement}`);
+    }
+    if (BigInt(mine.payout) !== stake) {
+      throw new Error(`void round must refund the full stake: got ${gen(mine.payout)} vs ${gen(stake)}`);
+    }
+    console.log("   ✅ backstop did not cover it, so the round voided and refunds in full");
   }
-  if (BigInt(mine.payout) !== BigInt(mine.amount)) {
-    throw new Error(`void round must refund the full stake: got ${gen(mine.payout)} vs ${gen(mine.amount)}`);
-  }
-  console.log("   ✅ one-sided round voided and refunds the full stake (no fee taken)");
 
   console.log("\n6️⃣  Claiming");
   console.log("   winnings are recorded but NOT paid until claimed");
@@ -226,8 +256,12 @@ async function main() {
   if (bal3 !== bal2) {
     throw new Error(`settlement must not move money: balance went ${gen(bal2)} to ${gen(bal3)}`);
   }
-  if (BigInt(mine.payout) !== BigInt(mine.amount)) {
-    throw new Error(`this bet should have been refunded in full, got ${gen(mine.payout)}`);
+
+
+  if (BigInt(mine.payout) === 0n) {
+    console.log("   nothing to collect — the bet lost against the house, which is a valid outcome");
+    console.log("\n✅ Smoke test passed — deposit, bet, house-covered settlement and loss all work on-chain.");
+    return;
   }
 
   // Now collect it, which is the step the player takes.
@@ -283,12 +317,16 @@ async function main() {
   // real contract mid-step and reports solvent funds as stranded, which is exactly
   // how this failed before. Poll until the two agree, and only then judge.
   const owed = BigInt(vault.total_liabilities);
-  let held = BigInt(await contractBalance());
+  // House market-making capital is the contract's own money, not a debt. It is a
+  // legitimate reason for holdings to exceed liabilities, so it is excluded before
+  // the two are compared — otherwise a funded backstop reads as stranded funds.
+  const houseCapital = BigInt(vault.house_capital || "0");
+  let held = BigInt(await contractBalance()) - houseCapital;
   for (let i = 0; i < 12 && owed === 0n && held > 0n; i++) {
     await sleep(5000);
-    held = BigInt(await contractBalance());
+    held = BigInt(await contractBalance()) - houseCapital;
   }
-  console.log(`   holds ${gen(held)} GEN, owes ${gen(owed)} GEN`);
+  console.log(`   holds ${gen(held)} GEN net of ${gen(houseCapital)} house capital, owes ${gen(owed)} GEN`);
   if (held < owed) {
     throw new Error(`under-collateralised: holds ${gen(held)} but owes ${gen(owed)}`);
   }

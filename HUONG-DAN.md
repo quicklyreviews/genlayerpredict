@@ -123,17 +123,29 @@ Mạng cần khoảng 1 phút để đồng thuận, nên sàn **đóng cược 
 **2. Market đang "ngủ" thì lệnh đầu tiên khởi động đồng hồ**
 Market chưa ai cược sẽ hiện *"Your bet starts the clock"*. Bạn cược là đồng hồ bắt đầu chạy, và mọi người có đủ thời gian vào cửa ngược lại.
 
-**3. Đoán đúng mà vẫn chỉ được hoàn tiền — khi không ai vào cửa ngược**
+**3. Khi không ai vào cửa ngược — nhà cái đứng ra đối ứng**
 
-Đây là điều gây khó chịu nhất, nên nói thật rõ:
+Tiền thắng **lấy từ tiền của bên thua**. Không ai cược ngược lại thì không có gì để thắng.
 
-Tiền thắng **lấy từ tiền của bên thua**. Không ai cược ngược lại thì không có gì để thắng — toàn bộ pool chính là tiền của bạn. Trả lại rồi gọi là "thắng" thì là trả bạn bằng tiền của chính bạn.
+Trước đây vòng như vậy bị **hoàn tiền** — đoán đúng vẫn không ăn được gì. Giờ:
 
-Ví dụ thật: giá khoá $79,304 → đóng $79,374, tăng 0.088%. Bạn cược UP — đúng hướng. Nhưng pool DOWN rỗng, nên vòng **hoàn đủ 0.1 GEN, không thu phí**.
+> **Nếu tới lúc khoá mà một bên vẫn trống, nhà cái tự đặt vào bên đó.**
 
-Sàn báo trước chứ không để bạn phát hiện lúc đã muộn: **ngay khi bạn đặt cược**, thẻ của vòng sẽ cảnh báo màu vàng nếu cửa ngược đang trống. Còn thời gian cược thì pool vẫn có thể thay đổi.
+Nhà cái đặt **bằng đúng số tiền bên kia**, nên tỷ lệ ra khoảng **1.94x** (2x trừ phí 3%) — đúng như một kèo 50/50 công bằng nên trả.
 
-Dòng kết quả cũng nói rõ lý do: *"UP was right, but nobody took the other side"*.
+Đoán đúng thì ăn tiền của nhà cái. Đoán sai thì mất tiền cho nhà cái. Sòng phẳng hai chiều.
+
+**Khi nào vẫn còn hoàn tiền?**
+
+| Trường hợp | Kết quả |
+|---|---|
+| Giá đóng **bằng đúng** giá khoá | Hoàn tiền — không ai đoán đúng cả |
+| Cược **vượt trần** nhà cái đỡ được cho mỗi vòng | Hoàn tiền |
+| Quỹ đối ứng của nhà cái **đã cạn** | Hoàn tiền |
+
+Những lúc đó sàn **nói trước ngay trên thẻ vòng**, màu vàng, chứ không để bạn phát hiện lúc đã xong. Ô dự tính tiền thắng cũng hiện đúng con số sẽ được trả.
+
+> **Lưu ý:** tiền đối ứng này là vốn riêng của nhà cái, **không phải vốn của người góp pool**. Prediction pool ở tab Earn vẫn đúng như cam kết: không dính rủi ro thắng thua.
 
 ---
 

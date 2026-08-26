@@ -27,6 +27,11 @@ class _Recipient:
         pass
 
 
+# Reserved bet key for the house's own side of a round. Not a valid address, so it
+# can never collide with a player: every real key is a lowercase 0x hex string.
+HOUSE = "house"
+
+
 class PredictMarket(gl.Contract):
     """
     GenPredict — "will it be up or down in N minutes?" parimutuel markets.
@@ -105,6 +110,11 @@ class PredictMarket(gl.Contract):
     rewards_pool: u256          # owner-funded subsidy that pays LP yield
     rewards_paid: u256          # lifetime yield actually handed out
     apy_bps: u256               # LP yield, in basis points per year
+    mm_total: u256              # house capital for taking the empty side of a round
+    mm_at_risk: u256            # the part of it committed to rounds not yet resolved
+    mm_max_per_round: u256      # exposure cap per round; zero disables the backstop
+    mm_pnl_wins: u256           # lifetime house profit from covered rounds
+    mm_pnl_losses: u256         # lifetime house loss from covered rounds
 
     # ─── Construction ────────────────────────────────────────────────
 
@@ -123,6 +133,25 @@ class PredictMarket(gl.Contract):
         self.balances_total = u256(0)
         self.staked_total = u256(0)
         self.unclaimed_total = u256(0)
+
+        # House market making. A parimutuel pays winners out of the losing side's
+        # stakes, so a round nobody opposed has nothing to pay from: the whole pool
+        # is the lone bettor's own money, and handing it back is the only honest
+        # settlement. That is correct and it is also a bad experience — calling the
+        # direction right and receiving your stake reads as the exchange getting it
+        # wrong.
+        #
+        # So the house takes the empty side itself, which is what a sportsbook or a
+        # pool-backed prediction market does: parimutuel whenever both sides have
+        # real money, and a counterparty of last resort when one does not. This is
+        # deliberately separate from the liquidity pool — providers there are
+        # promised no exposure to outcomes, and quietly spending their capital on
+        # directional risk would break that promise.
+        self.mm_total = u256(0)          # house capital available for market making
+        self.mm_at_risk = u256(0)        # committed to rounds not yet resolved
+        self.mm_max_per_round = u256(200000000000000000)  # 0.2 GEN
+        self.mm_pnl_wins = u256(0)
+        self.mm_pnl_losses = u256(0)
 
         # symbol, coingecko_id, horizon_seconds, betting_seconds, fee_bps, min_bet
         #
@@ -250,6 +279,26 @@ class PredictMarket(gl.Contract):
         return int(int(self.rewards_pool) / per_second)
 
     # ─── Vault ledger ────────────────────────────────────────────────
+
+    def _mm_free(self) -> int:
+        """House capital not already committed to a live round."""
+        return max(0, int(self.mm_total) - int(self.mm_at_risk))
+
+    def _mm_seed_for(self, up_pool: int, down_pool: int) -> int:
+        """What the house would stake to give a one-sided round a counterparty.
+
+        It matches the other side rather than choosing its own number, so the odds
+        stay honest: an evenly matched pool pays about 2x minus the fee, which is
+        what a fair coin-flip market should pay. Capped per round and by what is
+        free, and zero when both sides already have money — the house never
+        competes with real bettors for the pool.
+        """
+        if up_pool > 0 and down_pool > 0:
+            return 0
+        other = up_pool + down_pool
+        if other <= 0:
+            return 0
+        return min(other, int(self.mm_max_per_round), self._mm_free())
 
     def _credit(self, balances: dict, addr: str, amount: int) -> None:
         a = addr.lower()
@@ -519,6 +568,32 @@ class PredictMarket(gl.Contract):
         price = self._fetch_price(market["symbol"], market["coingecko_id"])
         rnd["lock_price"] = str(price)
         rnd["status"] = "LOCKED"
+
+        # Last chance to give a one-sided round a counterparty: after this the pools
+        # are fixed. The house stakes the empty side under a reserved key, so every
+        # existing payout path treats it as an ordinary bet and none of the maths
+        # below needs to know it is there.
+        bets = self._load(self.bets_json, {})
+        up_pool = int(rnd.get("up_pool", "0"))
+        down_pool = int(rnd.get("down_pool", "0"))
+        seed = self._mm_seed_for(up_pool, down_pool)
+        if seed > 0:
+            side = "DOWN" if down_pool == 0 else "UP"
+            if side == "DOWN":
+                rnd["down_pool"] = str(down_pool + seed)
+            else:
+                rnd["up_pool"] = str(up_pool + seed)
+            rnd["house_side"] = side
+            rnd["house_stake"] = str(seed)
+            bets.setdefault(market_key, {}).setdefault(str(rid), {})[HOUSE] = {
+                "side": side,
+                "amount": str(seed),
+                "settled": 0,
+                "payout": "0",
+                "claimed": 0,
+            }
+            self.mm_at_risk += u256(seed)
+            self.bets_json = json.dumps(bets)
         # Anchor the horizon to the actual lock, not the schedule: consensus latency
         # means this transaction lands somewhat after lock_ts, and the advertised
         # horizon should be measured from the price that was actually fixed.
@@ -577,6 +652,8 @@ class PredictMarket(gl.Contract):
         total = up_pool + down_pool
 
         # Void the round unless both sides actually had money on it — see _payout_for.
+        # A round the house took the empty side of is no longer one-sided, so this is
+        # only reached when the backstop was unfunded, capped out, or disabled.
         one_sided = up_pool == 0 or down_pool == 0
         settlement = "VOID" if (winner == "DRAW" or one_sided) else "PAID"
 
@@ -603,19 +680,40 @@ class PredictMarket(gl.Contract):
         rbets = bets.get(market_key, {}).get(rid, {})
         owed = 0
         winners = 0
+        house_stake = int(rnd.get("house_stake", "0"))
+        house_payout = 0
         for addr, bet in rbets.items():
             if int(bet.get("settled", 0)) == 1:
                 continue
             payout = self._payout_for(rnd, market, bet["side"], int(bet["amount"]))
             bet["settled"] = 1
             bet["payout"] = str(payout)
+            if addr == HOUSE:
+                # The house does not queue up to collect from itself; its side of the
+                # round is booked here and marked collected so nothing later reads it
+                # as money owed to a player.
+                bet["claimed"] = 1
+                house_payout = payout
+                continue
             bet["claimed"] = 0
             if payout > 0:
                 owed += payout
                 winners += 1
-        # The stakes stop being at risk and become claimable instead, so the vault
-        # still owes exactly the same money — it has just changed category.
-        self.staked_total = u256(max(0, int(self.staked_total) - total))
+
+        if house_stake > 0:
+            self.mm_at_risk = u256(max(0, int(self.mm_at_risk) - house_stake))
+            if house_payout >= house_stake:
+                self.mm_total += u256(house_payout - house_stake)
+                self.mm_pnl_wins += u256(house_payout - house_stake)
+            else:
+                lost = house_stake - house_payout
+                self.mm_total = u256(max(0, int(self.mm_total) - lost))
+                self.mm_pnl_losses += u256(lost)
+
+        # Player stakes stop being at risk and become claimable instead, so the vault
+        # still owes exactly the same money — it has just changed category. The house
+        # stake was never a liability, so it is excluded from that transfer.
+        self.staked_total = u256(max(0, int(self.staked_total) - (total - house_stake)))
         self.unclaimed_total += u256(owed)
         if rbets:
             bets[market_key][rid] = rbets
@@ -1027,6 +1125,54 @@ class PredictMarket(gl.Contract):
 
     # ─── Views ───────────────────────────────────────────────────────
 
+    @gl.public.write.payable
+    def fund_mm(self) -> dict[str, typing.Any]:
+        """Top up the house's market-making capital.
+
+        Anyone may fund it — the money is the contract's working capital for taking
+        the empty side, and it is withdrawable only by the owner, so an outside
+        contributor is making a donation and should know that. Kept apart from the
+        liquidity pool on purpose: this capital carries directional risk and pool
+        capital is promised none.
+        """
+        amount = int(gl.message.value)
+        if amount <= 0:
+            raise gl.vm.UserError("Send some GEN to fund market making")
+        self.mm_total += u256(amount)
+        return {"funded": str(amount), "mm_total": str(int(self.mm_total))}
+
+    @gl.public.write
+    def withdraw_mm(self, amount: u256) -> dict[str, typing.Any]:
+        """Take back uncommitted house capital. Never touches a live round's stake."""
+        self._require_owner()
+        want = int(amount)
+        free = self._mm_free()
+        if want <= 0 or want > free:
+            raise gl.vm.UserError(f"Can withdraw at most {free} (the rest is riding on live rounds)")
+        self.mm_total = u256(int(self.mm_total) - want)
+        _Recipient(gl.message.sender_address).emit_transfer(value=u256(want))
+        return {"withdrawn": str(want), "mm_total": str(int(self.mm_total))}
+
+    @gl.public.write
+    def set_mm_max_per_round(self, amount: u256) -> None:
+        """Cap the house's exposure to any single round. Zero disables the backstop,
+        which returns one-sided rounds to being refunded in full."""
+        self._require_owner()
+        self.mm_max_per_round = u256(int(amount))
+
+    @gl.public.view
+    def get_mm(self) -> dict[str, typing.Any]:
+        """House market-making position, for the UI and for anyone checking solvency."""
+        return {
+            "total": str(int(self.mm_total)),
+            "at_risk": str(int(self.mm_at_risk)),
+            "free": str(self._mm_free()),
+            "max_per_round": str(int(self.mm_max_per_round)),
+            "won": str(int(self.mm_pnl_wins)),
+            "lost": str(int(self.mm_pnl_losses)),
+            "enabled": 1 if int(self.mm_max_per_round) > 0 and self._mm_free() > 0 else 0,
+        }
+
     @gl.public.view
     def get_owner(self) -> str:
         return self.owner
@@ -1054,15 +1200,25 @@ class PredictMarket(gl.Contract):
         distributable = total - (total * fee_bps // 10000)
         # x100 integers: floats are not calldata-encodable, and the UI wants 2 decimals.
         #
-        # While one side is still empty the round would settle as VOID, so the honest
-        # figure is a 1.00x refund. Deriving it from the pool instead would advertise
-        # something below 1x — a number that can never actually be paid.
-        if up_pool == 0 or down_pool == 0:
+        # A one-sided round is quoted as it will actually settle. If the house can
+        # still take the empty side, the odds shown are the ones that seeding
+        # produces — which is roughly 2x minus the fee for an even match. If it
+        # cannot, the round will void and refund, so 1.00x is the honest figure;
+        # anything derived from the lone pool would advertise a number below 1x that
+        # can never be paid.
+        seed = 0
+        if rnd.get("status") == "OPEN":
+            seed = self._mm_seed_for(up_pool, down_pool)
+        eff_up = up_pool + (seed if up_pool == 0 else 0)
+        eff_down = down_pool + (seed if down_pool == 0 else 0)
+        eff_total = eff_up + eff_down
+        eff_distributable = eff_total - (eff_total * fee_bps // 10000)
+        if eff_up == 0 or eff_down == 0:
             up_x100 = 100 if up_pool > 0 else 0
             down_x100 = 100 if down_pool > 0 else 0
         else:
-            up_x100 = distributable * 100 // up_pool
-            down_x100 = distributable * 100 // down_pool
+            up_x100 = eff_distributable * 100 // eff_up
+            down_x100 = eff_distributable * 100 // eff_down
         return {
             "id": int(rnd["id"]),
             "market": rnd["market"],
@@ -1077,6 +1233,15 @@ class PredictMarket(gl.Contract):
             "up_pool": str(up_pool),
             "down_pool": str(down_pool),
             "total_pool": str(total),
+            # What the house has taken, or would take if the empty side stays empty.
+            "house_side": rnd.get("house_side", ""),
+            "house_stake": rnd.get("house_stake", "0"),
+            "house_would_seed": str(seed),
+            # The UI projects a payout for a stake that has not been placed yet, so
+            # it has to be able to work out what the house would match — the current
+            # seed figure does not include the bet the user is still typing.
+            "mm_cap": str(int(self.mm_max_per_round)),
+            "mm_free": str(self._mm_free()),
             "up_count": int(rnd.get("up_count", 0)),
             "down_count": int(rnd.get("down_count", 0)),
             "up_multiplier_x100": up_x100,
@@ -1271,6 +1436,9 @@ class PredictMarket(gl.Contract):
             "staked_principal": str(lp),
             "rewards_pool": str(rewards),
             "total_liabilities": str(balances + staked + unclaimed + treasury + lp + rewards),
+            # Working capital the contract owns rather than owes: it backs one-sided
+            # rounds and is the reason holdings can legitimately exceed liabilities.
+            "house_capital": str(int(self.mm_total)),
             "accounts": len(self._load(self.balances_json, {})),
         }
 
