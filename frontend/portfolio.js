@@ -17,6 +17,7 @@ import {
   write, waitAccepted, txLink, coinLogo,
 } from './shared.js';
 import * as results from './results.js';
+import * as recover from './recover.js';
 
 let bets = [];
 let filter = "all";
@@ -290,6 +291,7 @@ async function refresh({ fresh = false } = {}) {
   renderFilters();
   await autoReconnect();
   await refreshVaultChip();
+  recover.scan();
   await results.primeSeen();
   await results.refresh();
   await refresh();

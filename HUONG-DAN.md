@@ -29,6 +29,22 @@ Bấm **Connect Wallet**. Ví sẽ hỏi thêm mạng GenLayer Studio — bấm 
 
 Chưa có GEN thì xin ở faucet của GenLayer Studio.
 
+### Play balance là gì
+
+Là **tài khoản chơi nằm trong contract**, không phải ví của bạn.
+
+Bạn nạp GEN vào một lần, sau đó mọi lệnh cược trừ thẳng từ đó — khỏi phải ký và chờ đồng thuận từng lần. Rút về ví lúc nào cũng được.
+
+**Địa chỉ ví của bạn chính là số tài khoản.** Chỉ ví sở hữu mới chuyển được số dư đó — không khoá nào của người vận hành tiêu được.
+
+### Nếu Play balance bỗng dưng về 0
+
+Thường là do **contract vừa được deploy lại**. Mỗi lần deploy sinh ra một contract mới hoàn toàn, storage trống. Tiền bạn đã nạp **vẫn nằm nguyên ở contract cũ** — không tự chuyển sang, không tự về ví.
+
+**Không mất đi đâu cả.** Ở đầu trang chủ sẽ hiện ô màu vàng: *"X GEN is waiting on an older version"*, kèm nút **Take back**. Bấm là tiền về thẳng ví — bạn tự ký, không ai chuyển hộ.
+
+Nếu còn tiền **kẹt trong vòng chưa chốt** (contract cũ không còn ai chạy keeper), bấm **Finish round** trước rồi mới Take back được.
+
 ### Bước 3 — Nạp tiền chơi
 
 Bấm ô **Play balance** ở góc phải trên → tab **Deposit** → nhập số GEN → xác nhận.

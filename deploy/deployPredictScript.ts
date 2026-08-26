@@ -141,6 +141,21 @@ async function main() {
   console.log(`   Contract Address: ${contractAddress}`);
   console.log("\n📋 Add this to your .env:");
   console.log(`   PREDICT_CONTRACT_ADDRESS=${contractAddress}`);
+
+  // The address being replaced still holds every balance players deposited into it.
+  // Nothing migrates, and the app stops reading it the moment .env changes — so
+  // unless it is listed here, that money becomes invisible and looks stolen. This
+  // has already happened to a real user, twice.
+  const previous = process.env.PREDICT_CONTRACT_ADDRESS;
+  if (previous && previous.toLowerCase() !== String(contractAddress).toLowerCase()) {
+    const existing = (process.env.PREDICT_LEGACY_ADDRESSES || "")
+      .split(",").map((a) => a.trim()).filter(Boolean);
+    const merged = [previous, ...existing.filter((a) => a.toLowerCase() !== previous.toLowerCase())];
+    console.log("\n⚠️  The contract you just replaced still holds player balances.");
+    console.log("   Keep it reachable or that money reads as gone — add this line too:");
+    console.log(`   PREDICT_LEGACY_ADDRESSES=${merged.join(",")}`);
+  }
+
   console.log("\n▶️  Then start the keeper so rounds begin running:");
   console.log(`   npm run backend`);
 }

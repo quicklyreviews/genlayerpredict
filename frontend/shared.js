@@ -12,6 +12,7 @@ import { TransactionStatus } from 'genlayer-js/types';
 export const CONFIG = {
   backendUrl: "http://localhost:3005",
   predictAddress: "",
+  predictLegacyAddresses: [],
   perpAddress: "",
   // Studionet only — see scripts/chain.js for the same rule on the server side.
   rpcUrl: "https://studio.genlayer.com/api",
@@ -173,6 +174,10 @@ export async function loadConfig() {
     const r = await fetch(CONFIG.backendUrl + "/api/config");
     const d = await r.json();
     if (d.predictAddress) CONFIG.predictAddress = d.predictAddress;
+    // Superseded contracts, so a balance left in one can still be found and taken back.
+    if (Array.isArray(d.predictLegacyAddresses)) {
+      CONFIG.predictLegacyAddresses = d.predictLegacyAddresses;
+    }
     if (d.contractAddress) CONFIG.perpAddress = d.contractAddress;
   } catch (e) {
     console.warn("Could not load config from backend");

@@ -619,3 +619,22 @@ tbody tr:hover { background: var(--bg-raised); }
 /* The home results list shows every settled round, so it scrolls rather than
    silently stopping at an arbitrary count. */
 .results-scroll { max-height: 460px; overflow-y: auto; }
+
+/* ─── Recovering funds from a superseded contract ────────── */
+
+.recover {
+  background: var(--warn-soft); border: 1px solid var(--warn);
+  border-radius: 12px; padding: 14px 16px; margin-bottom: 18px;
+}
+.recover__head { font-size: 14px; color: var(--text); }
+.recover__why {
+  font-size: 12.5px; color: var(--text-dim);
+  margin: 6px 0 10px; line-height: 1.5;
+}
+.recover__row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 0; border-top: 1px solid rgba(255,255,255,0.08);
+  font-size: 13px;
+}
+.recover__addr { color: var(--text-muted); font-size: 12px; }
+.recover__actions { margin-left: auto; display: flex; gap: 7px; }

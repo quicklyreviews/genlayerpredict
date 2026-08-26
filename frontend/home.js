@@ -13,6 +13,7 @@ import {
 } from './shared.js';
 import { loadSession, refreshSessionGas } from './session.js';
 import * as results from './results.js';
+import * as recover from './recover.js';
 
 let markets = [];
 let filterHorizon = "all";
@@ -437,6 +438,7 @@ async function refreshMarkets() {
   initSearch();
   await autoReconnect();
   if (loadSession()) refreshSessionGas();
+  recover.scan();
   await results.primeSeen();
   await results.refresh();
   await refreshBets();

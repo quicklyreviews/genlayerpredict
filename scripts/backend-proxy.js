@@ -82,6 +82,22 @@ const client = createClient({ chain: studioChain, endpoint: RPC_URL, account });
 // routed through this backend, which would otherwise spend the admin's GEN.
 const KEEPER_WRITE_ALLOWLIST = new Set(["touch_price", "liquidate_position", "settle_funding"]);
 
+/**
+ * Prediction contracts this deployment has superseded, newest first.
+ *
+ * Every redeploy strands whatever players had deposited: the new contract starts
+ * with empty storage, the old one keeps the money, and the app only ever reads the
+ * current address. Listing the old ones lets the UI find balances left behind and
+ * hand them back — the withdrawal is signed by the owner of the funds, so this is
+ * only a pointer, never a key to someone else's money.
+ *
+ * Add an address here whenever you deploy, and drop it once it is drained.
+ */
+const PREDICT_LEGACY = (process.env.PREDICT_LEGACY_ADDRESSES || "")
+  .split(",")
+  .map((a) => a.trim())
+  .filter((a) => /^0x[0-9a-fA-F]{40}$/.test(a) && a.toLowerCase() !== String(PREDICT_ADDRESS).toLowerCase());
+
 function cors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -144,9 +160,10 @@ async function handleRead(method, args, { allowStale = true, address = CONTRACT_
 // round trip, and those move slowly enough that 15s is imperceptible.
 const PREDICT_TTL_MS = parseInt(process.env.PREDICT_TTL_MS || "30000", 10);
 
-async function handlePredictRead(method, args, { fresh = false } = {}) {
-  if (!PREDICT_ADDRESS) throw new Error("PREDICT_CONTRACT_ADDRESS is not configured");
-  const cacheKey = "predict:" + method + JSON.stringify(args || []);
+async function handlePredictRead(method, args, { fresh = false, address = null } = {}) {
+  const target = address || PREDICT_ADDRESS;
+  if (!target) throw new Error("PREDICT_CONTRACT_ADDRESS is not configured");
+  const cacheKey = "predict:" + target + ":" + method + JSON.stringify(args || []);
   const hit = readCache[cacheKey];
   const ttl = method === "get_all_markets" ? LONG_TTL_MS : PREDICT_TTL_MS;
   // A caller that just moved money needs to see the result, not a value cached
@@ -154,14 +171,14 @@ async function handlePredictRead(method, args, { fresh = false } = {}) {
   if (!fresh && hit && Date.now() - hit.ts < ttl) return hit.value;
   try {
     const result = await withTimeout(
-      client.readContract({ address: PREDICT_ADDRESS, functionName: method, args: args || [] }),
+      client.readContract({ address: target, functionName: method, args: args || [] }),
       25000
     );
     readCache[cacheKey] = { value: result, ts: Date.now() };
     return result;
   } catch (e) {
     if (hit !== undefined) {
-      console.warn(`[RPC] predict.${method} failed (${e.message}), serving stale cache`);
+      console.warn(`[RPC] predict.${method} on ${target.slice(0, 10)} failed (${e.message}), serving stale cache`);
       return hit.value;
     }
     throw e;
@@ -194,7 +211,14 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
 
   if (req.method === "GET" && url.pathname === "/api/config") {
-    json(res, { contractAddress: CONTRACT_ADDRESS, predictAddress: PREDICT_ADDRESS });
+    json(res, {
+      contractAddress: CONTRACT_ADDRESS,
+      predictAddress: PREDICT_ADDRESS,
+      // Deploying replaces the contract, and a deposited balance stays behind in the
+      // old one: it does not migrate and it does not return to the wallet. Without
+      // this list the app simply stops looking at it, and the money reads as gone.
+      predictLegacyAddresses: PREDICT_LEGACY,
+    });
     return;
   }
 
@@ -205,11 +229,21 @@ const server = http.createServer(async (req, res) => {
     req.on("data", (chunk) => (body += chunk));
     req.on("end", async () => {
       try {
-        const { method, args, type, fresh } = JSON.parse(body);
+        const { method, args, type, fresh, address } = JSON.parse(body);
         if (type === "write") {
           throw new Error(`Predict writes must be signed by your own wallet, not the backend`);
         }
-        json(res, await handlePredictRead(method, args, { fresh: fresh === true }));
+        // Reads may target a superseded contract so players can find balances left
+        // there, but only one this deployment actually listed. Forwarding arbitrary
+        // addresses would turn a read cache into an open RPC relay against a node
+        // with a request budget we already struggle to stay inside.
+        let target;
+        if (address) {
+          const ok = PREDICT_LEGACY.find((a) => a.toLowerCase() === String(address).toLowerCase());
+          if (!ok) throw new Error("That address is not a known previous version of this contract");
+          target = ok;
+        }
+        json(res, await handlePredictRead(method, args, { fresh: fresh === true, address: target }));
       } catch (e) {
         json(res, { error: e.message }, 500);
       }
