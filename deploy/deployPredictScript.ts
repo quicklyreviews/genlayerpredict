@@ -44,6 +44,33 @@ async function main() {
   console.log(`   RPC: ${rpcUrl}`);
   console.log(`   Source size: ${contractCode.length} bytes`);
 
+  // Before replacing anything, give the outgoing contract's players their money
+  // back. Deploying strands whatever is left there — the new contract starts empty
+  // and the app stops reading the old address — and pointing at the old one
+  // afterwards is never as good as the balance simply being home.
+  const outgoing = process.env.PREDICT_CONTRACT_ADDRESS;
+  if (outgoing && process.env.SKIP_DRAIN !== "1") {
+    console.log(`   💸 Returning player funds from the contract being replaced (${outgoing})...`);
+    try {
+      const { drain } = await import("../scripts/drain");
+      const clean = await drain(outgoing, (m: string) => console.log(m));
+      if (!clean) {
+        throw new Error(
+          `The outgoing contract still holds player money.\n` +
+            `   Resolve its open rounds and let providers unstake, then deploy again.\n` +
+            `   To deploy anyway (funds stay recoverable via PREDICT_LEGACY_ADDRESSES):\n` +
+            `   SKIP_DRAIN=1 npm run deploy`
+        );
+      }
+    } catch (e: any) {
+      if (String(e.message).includes("still holds player money")) throw e;
+      // An older contract has no refund_all. That is exactly why this exists, but it
+      // is not a reason to block a deploy — the legacy list still gets players home.
+      console.log(`   ⚠ Could not drain automatically (${e.message}).`);
+      console.log(`     Make sure the address is in PREDICT_LEGACY_ADDRESSES so players can recover.`);
+    }
+  }
+
   // Validate in GenVM BEFORE spending gas: a deploy of an unloadable contract still
   // reports EVM status 0x1, burns the fee, and leaves nothing at the address.
   console.log("   🔍 Validating contract schema in GenVM...");

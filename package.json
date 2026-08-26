@@ -15,6 +15,7 @@
     "smoke:perp": "tsx scripts/perp-smoke-test.ts",
     "fund-vault": "tsx scripts/fund-vault.ts",
     "fund-house": "tsx scripts/fund-house.ts",
+    "drain": "tsx scripts/drain.ts",
     "keeper": "node scripts/predict-keeper.js",
     "keeper:perp": "tsx scripts/perp-keeper.ts",
     "backend": "node scripts/backend-proxy.js",

@@ -924,6 +924,86 @@ class PredictMarket(gl.Contract):
         _Recipient(gl.message.sender_address).emit_transfer(value=u256(amt))
         return {"withdrawn": str(amt), "balance": "0"}
 
+    @gl.public.write
+    def refund_all(self, limit: u256) -> dict[str, typing.Any]:
+        """Push every player's money back to their own wallet.
+
+        This exists because withdraw_all cannot do it. That function credits
+        gl.message.sender_address, so it only ever pays whoever calls it — the same
+        property that stops an operator draining the contract also stops them
+        handing anything back. Without a push like this one, replacing the contract
+        strands every deposited balance in an address nobody points at any more,
+        which is exactly what happened four deploys running.
+
+        Owner-callable, but not owner-benefiting: funds go to the address that owns
+        them, read from the ledger, never to the caller. The owner spends gas to
+        return other people's money and can direct it nowhere else.
+
+        Uncollected winnings are credited first, so a win nobody picked up is
+        refunded with the rest rather than left behind as the one thing that did not
+        survive the migration.
+
+        Batched: `limit` accounts per call, because a contract with many players
+        would otherwise exceed what one transaction can do. Call it until
+        `remaining` reaches zero.
+        """
+        self._require_owner()
+        n = max(1, int(limit))
+
+        rounds = self._load(self.rounds_json, {})
+        bets = self._load(self.bets_json, {})
+        balances = self._load(self.balances_json, {})
+
+        # 1. Settled-but-uncollected winnings become spendable balance.
+        credited = 0
+        for market_key, mbets in bets.items():
+            for rid, rbets in mbets.items():
+                rnd = rounds.get(market_key, {}).get(rid)
+                if not rnd or rnd.get("status") != "RESOLVED":
+                    continue
+                for addr, bet in rbets.items():
+                    if addr == HOUSE or int(bet.get("claimed", 0)) == 1:
+                        continue
+                    payout = int(bet.get("payout", "0"))
+                    if payout <= 0:
+                        continue
+                    bet["claimed"] = 1
+                    bet["claimed_ts"] = int(time.time())
+                    self._credit(balances, addr, payout)
+                    self.unclaimed_total = u256(max(0, int(self.unclaimed_total) - payout))
+                    credited += payout
+        if credited > 0:
+            self.bets_json = json.dumps(bets)
+
+        # 2. Send each balance home, up to the batch limit.
+        paid = 0
+        total_sent = 0
+        for addr in sorted(balances.keys()):
+            if paid >= n:
+                break
+            amt = int(balances.get(addr, "0"))
+            if amt <= 0:
+                continue
+            self._debit(balances, addr, amt)
+            _Recipient(addr).emit_transfer(value=u256(amt))
+            total_sent += amt
+            paid += 1
+
+        self.balances_json = json.dumps(balances)
+        remaining = sum(1 for v in balances.values() if int(v) > 0)
+
+        return {
+            "refunded_accounts": paid,
+            "refunded_total": str(total_sent),
+            "credited_unclaimed": str(credited),
+            "remaining_accounts": remaining,
+            # Money that cannot be pushed yet, so the operator knows the contract is
+            # not safe to abandon: stakes on rounds that have not resolved, and LP
+            # principal, which has to be unstaked by its owner to settle interest.
+            "still_staked_in_rounds": str(int(self.staked_total)),
+            "lp_principal": str(int(self.staked_principal)),
+        }
+
     # ─── Betting ─────────────────────────────────────────────────────
 
     @gl.public.write
