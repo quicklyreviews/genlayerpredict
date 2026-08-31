@@ -1,0 +1,4 @@
+{
+  "_comment": "Where the API lives. Leave backendUrl empty for local development (it falls back to http://localhost:3005) and set it to your deployed backend's URL — e.g. https://genpredict-api.onrender.com — before publishing the frontend.",
+  "backendUrl": ""
+}

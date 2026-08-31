@@ -10,7 +10,10 @@ import { studionet } from 'genlayer-js/chains';
 import { TransactionStatus } from 'genlayer-js/types';
 
 export const CONFIG = {
-  backendUrl: "http://localhost:3005",
+  // Filled in by loadConfig(). Hard-coding localhost here shipped a site that told
+  // every visitor's own machine to serve the API, which works on exactly one
+  // computer — the developer's.
+  backendUrl: "",
   predictAddress: "",
   predictLegacyAddresses: [],
   perpAddress: "",
@@ -169,8 +172,36 @@ export async function readPerp(fn, args = []) {
   });
 }
 
+/**
+ * Works out where the API lives before asking it anything.
+ *
+ * Three sources, most explicit first. `backend.json` beside the page is what a
+ * deployment sets — one file to edit, no build step. Failing that, a page served
+ * from localhost assumes the usual dev port, and anything else assumes the API is
+ * on its own origin behind a proxy. That last default is the one that makes a
+ * static host work without configuration when the backend is proxied under /api.
+ */
+export async function resolveBackendUrl() {
+  try {
+    const r = await fetch("backend.json", { cache: "no-store" });
+    if (r.ok) {
+      const d = await r.json();
+      if (d && typeof d.backendUrl === "string" && d.backendUrl) {
+        return d.backendUrl.replace(/\/$/, "");
+      }
+    }
+  } catch (e) { /* no deployment override present */ }
+
+  const host = location.hostname;
+  if (host === "localhost" || host === "127.0.0.1" || host === "") {
+    return "http://localhost:3005";
+  }
+  return location.origin;
+}
+
 export async function loadConfig() {
   try {
+    if (!CONFIG.backendUrl) CONFIG.backendUrl = await resolveBackendUrl();
     const r = await fetch(CONFIG.backendUrl + "/api/config");
     const d = await r.json();
     if (d.predictAddress) CONFIG.predictAddress = d.predictAddress;
@@ -180,7 +211,7 @@ export async function loadConfig() {
     }
     if (d.contractAddress) CONFIG.perpAddress = d.contractAddress;
   } catch (e) {
-    console.warn("Could not load config from backend");
+    console.warn(`Could not load config from the backend at ${CONFIG.backendUrl || "(unresolved)"}`);
   }
 }
 

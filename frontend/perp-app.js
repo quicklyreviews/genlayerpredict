@@ -11,11 +11,13 @@ import { studionet } from 'genlayer-js/chains';
 import { TransactionStatus } from 'genlayer-js/types';
 // The one polling helper the whole app uses, so hidden-tab behaviour is identical
 // everywhere rather than reimplemented per page.
-import { pollWhileVisible } from './shared.js';
+import { pollWhileVisible, resolveBackendUrl } from './shared.js';
 
 // ─── Configuration ──────────────────────────────────────────────────
 let CONFIG = {
-  backendUrl: "http://localhost:3005",
+  // Resolved at startup, the same way the rest of the app does it. A hard-coded
+  // localhost here would point every visitor at their own machine.
+  backendUrl: "",
   contractAddress: "",
 };
 
@@ -554,10 +556,13 @@ function stopPolling() {
 // ─── Init ───────────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", async () => {
   try {
+    CONFIG.backendUrl = await resolveBackendUrl();
     const r = await fetch(CONFIG.backendUrl + "/api/config");
     const d = await r.json();
     if (d.contractAddress) CONFIG.contractAddress = d.contractAddress;
-  } catch (e) { console.warn("Failed to load config from backend, using default."); }
+  } catch (e) {
+    console.warn(`Failed to load config from the backend at ${CONFIG.backendUrl || "(unresolved)"}`);
+  }
 
   localStorage.removeItem("backend_url");
   localStorage.removeItem("contract_address");

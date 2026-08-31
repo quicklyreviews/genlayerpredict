@@ -38,6 +38,44 @@ Most recent run: a lone 0.2 GEN bet on BTC-5m, the house took the empty DOWN sid
 the round settled PAID at $78,391 → $78,606, and 0.2 staked returned 0.388 — 1.94x.
 Collecting twice was rejected, and holdings reconciled with debts.
 
+## Publishing it
+
+Two pieces. The frontend is static files; the backend is a Node process that holds
+a key, runs the keepers and proxies reads.
+
+**1. Backend** — any host that runs Node (Render, Railway, Fly). Start command
+`npm run backend`, and set these environment variables:
+
+| | |
+|---|---|
+| `PRIVATE_KEY` | keeper wallet — needs GEN for gas, and owns the contract |
+| `PREDICT_CONTRACT_ADDRESS` | current prediction contract |
+| `CONTRACT_ADDRESS` | perp exchange |
+| `PREDICT_LEGACY_ADDRESSES` | superseded contracts, comma separated, so players can recover balances left in them |
+| `PORT` | provided by the host |
+
+It already sends `Access-Control-Allow-Origin: *`, so the frontend can live on a
+different domain.
+
+**2. Frontend** — any static host. `vercel.json` points Vercel at `frontend/`.
+Before publishing, put the backend's public URL in `frontend/backend.json`:
+
+```json
+{ "backendUrl": "https://your-backend.onrender.com" }
+```
+
+Leave it empty and the page falls back to `http://localhost:3005` when served from
+localhost, or to its own origin otherwise — which is right only if the backend is
+proxied under the same domain. Getting this wrong is the classic failure: a
+hard-coded localhost ships a site that asks every visitor's own machine for the
+API, and works on exactly one computer.
+
+**Do not publish `.env`.** It holds the keeper's private key. The host's
+environment variables are the only place it belongs.
+
+> The keeper must keep running or rounds never lock or settle. A host that sleeps
+> idle instances will stall the markets until it wakes.
+
 | Page | What it is |
 |---|---|
 | `index.html` | Market list — filter by horizon and coin, live countdowns and odds |
