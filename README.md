@@ -58,11 +58,15 @@ It already sends `Access-Control-Allow-Origin: *`, so the frontend can live on a
 different domain.
 
 **2. Frontend** — any static host. `vercel.json` points Vercel at `frontend/`.
-Before publishing, put the backend's public URL in `frontend/backend.json`:
+Set one environment variable on the host and the build writes the config for you:
 
-```json
-{ "backendUrl": "https://your-backend.onrender.com" }
-```
+| | |
+|---|---|
+| `BACKEND_URL` | the backend's public URL, e.g. `https://genpredict-api.onrender.com` |
+
+`npm run build` turns that into `frontend/backend.json`, so the URL never has to be
+committed and one commit can deploy against different backends. Editing that file
+by hand works too, for a host with no build step.
 
 Leave it empty and the page falls back to `http://localhost:3005` when served from
 localhost, or to its own origin otherwise — which is right only if the backend is
