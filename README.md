@@ -43,8 +43,13 @@ Collecting twice was rejected, and holdings reconciled with debts.
 Two pieces. The frontend is static files; the backend is a Node process that holds
 a key, runs the keepers and proxies reads.
 
-**1. Backend** — any host that runs Node (Render, Railway, Fly). Start command
-`npm run backend`, and set these environment variables:
+**1. Backend** — any host that runs Node. `render.yaml` is a Render blueprint: point
+Render at this repository as a Blueprint and the service is created with the start
+command, health check and every address already filled in. It asks only for
+`PRIVATE_KEY`, which is deliberately not in the repository.
+
+On any other host, the start command is `npm run backend` and these are the
+environment variables:
 
 | | |
 |---|---|
@@ -78,7 +83,12 @@ API, and works on exactly one computer.
 environment variables are the only place it belongs.
 
 > The keeper must keep running or rounds never lock or settle. A host that sleeps
-> idle instances will stall the markets until it wakes.
+> idle instances — Render's free plan among them — stalls the markets until a
+> request wakes it, so rounds settle late rather than on time.
+
+**If `/api/predict/call` returns 500**, read the body: it says which variable is
+missing. An empty `predictAddress` in `/api/config` means `PREDICT_CONTRACT_ADDRESS`
+never reached the host, and every prediction read fails until it does.
 
 | Page | What it is |
 |---|---|

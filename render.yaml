@@ -1,0 +1,44 @@
+# Render blueprint for the GenPredict backend.
+#
+# The backend is the read proxy and, more importantly, the keeper: rounds only
+# lock and settle while it is running. The frontend is static and belongs on a
+# static host — only this half needs a server.
+#
+# Point Render at this repository as a Blueprint and it creates the service with
+# everything below already filled in. The two values marked `sync: false` are not
+# in the repository and never should be: Render prompts for them once.
+services:
+  - type: web
+    name: genlayerpredict
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm run backend
+    healthCheckPath: /api/config
+    envVars:
+      # The contracts the app reads. Wrong or missing, every /api/predict/call
+      # returns 500 with "PREDICT_CONTRACT_ADDRESS is not configured".
+      - key: PREDICT_CONTRACT_ADDRESS
+        value: "0x1c06C78ed6b17e4126f11b9d5361EE886F1e2D11"
+      - key: CONTRACT_ADDRESS
+        value: "0x91Eee37BeDAfcF15a64a53F93236Cec84AF3a7B8"
+
+      # Contracts this deployment has replaced. Balances players deposited stay in
+      # them, so listing them here is what lets the app find that money and hand it
+      # back. Drop an address once it is drained.
+      - key: PREDICT_LEGACY_ADDRESSES
+        value: "0x127a639d180385735edd8493445C1c31C961bbc3,0x561ae5A6638686C3c5AE3E1004f586DaC74C355B,0x4537B16220Ff4aC8e033c40Efb3659eaac67361A"
+
+      - key: GENLAYER_RPC_URL
+        value: "https://studio.genlayer.com/api"
+
+      # The keeper's wallet. It signs start/lock/resolve, owns the contract, and
+      # needs GEN for gas. Set it in Render's dashboard — a private key in a
+      # repository is a private key you have given away.
+      - key: PRIVATE_KEY
+        sync: false
+
+      # Pinned so a Render default bump cannot change the runtime under the keeper
+      # without anyone choosing it.
+      - key: NODE_VERSION
+        value: "22"
